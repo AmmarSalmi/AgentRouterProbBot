@@ -1,0 +1,14 @@
+.env
+.git
+.pytest_cache
+pytest-cache-files-*
+__pycache__
+*.py[cod]
+*.egg-info
+.venv
+tests
+state.json
+telegram.json
+.telegram.json.tmp
+.test-tmp
+
