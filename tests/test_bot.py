@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 
 from agentrouter_prober.app import Prober
@@ -16,16 +17,6 @@ from agentrouter_prober.state import StateStore
 
 
 def make_settings(directory: Path) -> Settings:
-    config = directory / "config.toml"
-    config.write_text(
-        'model = "gpt-6.1-sol"\n'
-        'model_provider = "AgentRouter"\n\n'
-        '[model_providers.AgentRouter]\n'
-        'base_url = "https://agentrouter.org/v1"\n'
-        'env_key = "CODEX_GATEWAY_API_KEY"\n'
-        'wire_api = "responses"\n',
-        encoding="utf-8",
-    )
     return Settings(
         agentrouter_base_url="https://agentrouter.test",
         agentrouter_api_key="sk-test",
@@ -38,7 +29,6 @@ def make_settings(directory: Path) -> Settings:
         health_max_age_seconds=3600,
         agentrouter_dashboard_token="dashboard-token",
         agentrouter_user_id=1,
-        codex_config_path=config,
         client_user_agent="codex_cli_rs/test",
     )
 
@@ -50,18 +40,6 @@ def message(text, user_id=42, chat_id=42, chat_type="private", is_bot=False):
             "text": text,
             "chat": {"id": chat_id, "type": chat_type},
             "from": {"id": user_id, "is_bot": is_bot},
-        },
-    }
-
-
-def callback(model, user_id=42):
-    return {
-        "update_id": 2,
-        "callback_query": {
-            "id": "query-1",
-            "data": f"codex:{model}",
-            "from": {"id": user_id, "is_bot": False},
-            "message": {"chat": {"id": 42, "type": "private"}},
         },
     }
 
@@ -110,13 +88,9 @@ class FakeTelegram:
 
     def __init__(self):
         self.sent = []
-        self.answered = []
 
     async def send(self, text, *, reply_markup=None):
         self.sent.append((text, reply_markup))
-
-    async def answer_callback_query(self, query_id, text=None):
-        self.answered.append((query_id, text))
 
 
 def setup(directory):
@@ -189,53 +163,91 @@ def test_usage_alias_reports_account_errors_without_stopping_commands(state_dire
     assert telegram.sent[-1][0] == "AgentRouter balance check failed: invalid account response"
 
 
-def test_codex_picker_only_shows_responses_models(state_directory):
-    _, _, telegram, commands = setup(state_directory)
+def test_removed_codex_controls_are_ignored(state_directory):
+    _, agent, telegram, commands = setup(state_directory)
+    updates = [
+        message("/set_model"),
+        message("/models"),
+        message("Set Codex Model"),
+        {
+            "update_id": 2,
+            "callback_query": {
+                "id": "query-1",
+                "data": "codex:gpt-6.2-sol",
+                "from": {"id": 42, "is_bot": False},
+                "message": {"chat": {"id": 42, "type": "private"}},
+            },
+        },
+    ]
 
     async def run():
-        await commands.prober.run_cycle()
-        await commands.handle_update(message("Set Codex Model"))
+        for update in updates:
+            await commands.handle_update(update)
 
     asyncio.run(run())
-    text, markup = telegram.sent[-1]
-    labels = [row[0]["text"] for row in markup["inline_keyboard"]]
-    assert labels == ["✓ gpt-6.1-sol", "gpt-6.2-sol"]
-    assert "claude-opus-5-5" in text and "Not Codex-compatible" in text
-
-
-def test_codex_callback_updates_toml_and_answers_query(state_directory):
-    settings, _, telegram, commands = setup(state_directory)
-
-    async def run():
-        await commands.prober.run_cycle()
-        await commands.handle_update(callback("gpt-6.2-sol"))
-
-    asyncio.run(run())
-    assert telegram.answered == [("query-1", "Updating Codex…")]
-    text = settings.codex_config_path.read_text(encoding="utf-8")
-    assert 'model = "gpt-6.2-sol"' in text
-    assert settings.codex_config_path.with_name(
-        "config.toml.agentrouter-prober.bak"
-    ).is_file()
-    assert "now gpt-6.2-sol" in telegram.sent[-1][0]
-
-
-def test_other_users_cannot_probe_or_change_codex(state_directory):
-    settings, agent, telegram, commands = setup(state_directory)
-    asyncio.run(commands.handle_update(message("Probe Now", user_id=99)))
-    asyncio.run(commands.handle_update(callback("gpt-6.2-sol", user_id=99)))
     assert agent.status_calls == 0
-    assert telegram.sent == [] and telegram.answered == []
-    assert 'model = "gpt-6.1-sol"' in settings.codex_config_path.read_text(
-        encoding="utf-8"
-    )
+    assert telegram.sent == []
+
+
+def test_other_users_cannot_probe_or_change_schedule(state_directory):
+    _, agent, telegram, commands = setup(state_directory)
+
+    async def run():
+        await commands.handle_update(message("Probe Now", user_id=99))
+        await commands.handle_update(message("Every 5 min", user_id=99))
+
+    asyncio.run(run())
+    assert agent.status_calls == 0
+    assert commands.prober.poll_seconds == 900
+    assert telegram.sent == []
 
 
 def test_schedule_describes_exact_dynamic_policy(state_directory):
     _, agent, telegram, commands = setup(state_directory)
     asyncio.run(commands.handle_update(message("Probing Schedule")))
-    text = telegram.sent[-1][0]
+    text, markup = telegram.sent[-1]
     assert "Every 15 minutes" in text
     assert "every model listed there" in text
-    assert "documentation or pricing page are never added" in text
+    assert "At most 2 model probes run at once" in text
+    assert [[button["text"] for button in row] for row in markup["keyboard"]] == [
+        ["Every 5 min", "Every 15 min", "Every 30 min"],
+        ["Use default", "Back"],
+    ]
     assert agent.status_calls == 0
+
+
+def test_schedule_choice_survives_restart_and_can_be_reset(state_directory):
+    settings, _, telegram, commands = setup(state_directory)
+    asyncio.run(commands.handle_update(message("Every 30 min")))
+
+    assert commands.prober.poll_seconds == 1800
+    assert telegram.sent[-1][0] == "Automatic probes every 30 minutes."
+    assert telegram.sent[-1][1]["keyboard"][1][-1]["text"] == "Probing Schedule"
+
+    agent, telegram = FakeAgent(), FakeTelegram()
+    restarted_settings = replace(settings, poll_seconds=1200)
+    restarted = TelegramCommands(Prober(restarted_settings, agent, telegram))
+
+    async def reset():
+        await restarted.handle_update(message("/schedule"))
+        assert "Every 30 minutes" in telegram.sent[-1][0]
+        await restarted.handle_update(message("Use default"))
+
+    asyncio.run(reset())
+    assert restarted.prober.poll_seconds == 1200
+    assert telegram.sent[-1][0] == "Automatic probes every 20 minutes."
+    assert StateStore(settings.state_path).load().poll_seconds_override is None
+    assert agent.status_calls == 0
+
+
+def test_schedule_save_failure_keeps_the_current_interval(state_directory, monkeypatch):
+    _, _, telegram, commands = setup(state_directory)
+
+    def fail_to_save(state):
+        raise OSError("Unable to write state")
+
+    monkeypatch.setattr(commands.prober.store, "save", fail_to_save)
+    asyncio.run(commands.handle_update(message("Every 30 min")))
+
+    assert commands.prober.poll_seconds == 900
+    assert telegram.sent[-1][0] == "The probing interval could not be saved. Try again."

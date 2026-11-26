@@ -21,7 +21,6 @@ def configured_env(monkeypatch, state_directory):
         "AGENTROUTER_DASHBOARD_TOKEN": "dashboard-token",
         "AGENTROUTER_USER_ID": "60923",
         "AGENTROUTER_BASE_URL": "https://agentrouter.test",
-        "CODEX_CONFIG_PATH": str(state_directory / "config.toml"),
         "POLL_SECONDS": "900",
         "STATE_PATH": str(state_directory / "state.json"),
     }
@@ -321,8 +320,13 @@ def test_daemon_menu_handles_commands_queued_after_start(
             "from": {"id": user_id, "is_bot": False},
         }}
 
-    updates = [message(1, 42, "/start"), message(2, 42, "/status"),
-               message(3, 42, "Probing Schedule"), message(4, 99, "/status")]
+    updates = [
+        message(1, 42, "/start"),
+        message(2, 42, "/status"),
+        message(3, 42, "Probing Schedule"),
+        message(4, 42, "Every 30 min"),
+        message(5, 99, "/status"),
+    ]
 
     async def handler(request):
         nonlocal acknowledged
@@ -359,23 +363,20 @@ def test_daemon_menu_handles_commands_queued_after_start(
     texts = [item["text"] for item in sent]
     assert "gpt-6-astra ✅" in texts
     assert any(text.startswith("Probing Schedule") and "15 minutes" in text for text in texts)
+    assert "Automatic probes every 30 minutes." in texts
     assert all(item["chat_id"] == "42" for item in sent)
-    assert sent[0]["reply_markup"]["keyboard"][0] == [
-        {"text": "Status"}, {"text": "Probe Now"}
-    ]
-    assert sent[0]["reply_markup"]["keyboard"][1] == [
-        {"text": "Balance & Usage"}, {"text": "Set Codex Model"}
-    ]
-    assert sent[0]["reply_markup"]["keyboard"][2] == [
-        {"text": "Probing Schedule"}
+    assert sent[0]["reply_markup"]["keyboard"] == [
+        [{"text": "Status"}, {"text": "Probe Now"}],
+        [{"text": "Balance & Usage"}, {"text": "Probing Schedule"}],
     ]
     assert menus[0][0] == "setMyCommands"
     assert menus[0][1]["scope"] == {"type": "chat", "chat_id": 42}
     assert [item["command"] for item in menus[0][1]["commands"]] == [
-        "status", "balance", "probe_now", "set_model", "probing_schedule"
+        "status", "balance", "probe_now", "probing_schedule"
     ]
     assert menus[1] == ("setChatMenuButton", {"chat_id": 42, "menu_button": {"type": "commands"}})
-    assert offsets == [None, 2, None, 5]
+    assert offsets == [None, 2, None, 6]
     assert model_requests == ["/api/user/model-status", "/v1/responses"]
+    assert StateStore(configured_env).load().poll_seconds_override == 1800
     assert TelegramRegistrationStore(configured_env).load().chat_id == 42
     assert all(client.is_closed for client in clients)

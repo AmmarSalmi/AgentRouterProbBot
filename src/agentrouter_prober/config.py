@@ -45,16 +45,6 @@ def _url(name: str, default: str) -> str:
     return value
 
 
-def _codex_config_path() -> Path:
-    explicit = os.getenv("CODEX_CONFIG_PATH", "").strip()
-    if explicit:
-        return Path(explicit).expanduser()
-    codex_home = os.getenv("CODEX_HOME", "").strip()
-    if codex_home:
-        return Path(codex_home).expanduser() / "config.toml"
-    return Path.home() / ".codex" / "config.toml"
-
-
 @dataclass(frozen=True)
 class TelegramSettings:
     bot_token: str
@@ -83,7 +73,6 @@ class Settings:
     request_timeout_seconds: int
     state_path: Path
     health_max_age_seconds: int
-    codex_config_path: Path
     client_user_agent: str
     reasoning_effort: str = "low"
 
@@ -113,7 +102,6 @@ class Settings:
             request_timeout_seconds=_positive_int("REQUEST_TIMEOUT_SECONDS", 90),
             state_path=Path(os.getenv("STATE_PATH", "/data/state.json")),
             health_max_age_seconds=_positive_int("HEALTH_MAX_AGE_SECONDS", 3600),
-            codex_config_path=_codex_config_path(),
             client_user_agent=os.getenv(
                 "AGENTROUTER_CLIENT_USER_AGENT",
                 "codex_cli_rs/0.171.0 (Windows 11; x86_64)",

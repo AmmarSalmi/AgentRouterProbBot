@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from time import monotonic
 
 from .clients import (
     AccountUsage,
@@ -18,7 +18,6 @@ from .clients import (
     TelegramClient,
     TransientClientError,
 )
-from .codex import CodexConfig, CodexConfigError, CodexConfigManager
 from .config import Settings
 from .messages import availability_message, telegram_message_parts
 from .state import (
@@ -52,15 +51,14 @@ class Prober:
         agentrouter: AgentRouterClient,
         telegram: TelegramClient,
         store: StateStore | None = None,
-        codex: CodexConfigManager | None = None,
     ):
         self.settings = settings
         self.agentrouter = agentrouter
         self.telegram = telegram
         self.store = store or StateStore(settings.state_path)
         self.state: PersistentState = self.store.load()
-        self.codex = codex or CodexConfigManager(settings.codex_config_path)
         self._cycle_lock = asyncio.Lock()
+        self._poll_wakeup = asyncio.Event()
         self.telegram.send_retry_at = parse_datetime(self.state.telegram_retry_at)
 
     async def close(self) -> None:
@@ -75,26 +73,17 @@ class Prober:
         )
 
     @property
-    def codex_model_options(self) -> list[str]:
-        return [
-            model
-            for model in self.state.active_models
-            if "responses" in self.state.model(model).apis
-        ]
+    def poll_seconds(self) -> int:
+        return self.state.poll_seconds_override or self.settings.poll_seconds
 
-    async def codex_config(self) -> CodexConfig:
-        return await asyncio.to_thread(self.codex.read)
-
-    async def set_codex_model(self, model: str) -> CodexConfig:
-        if model not in self.state.active_models:
-            raise CodexConfigError(
-                f"{model} is no longer listed on AgentRouter model-status"
-            )
-        if "responses" not in self.state.model(model).apis:
-            raise CodexConfigError(
-                f"{model} is not Codex-compatible (Responses API is not advertised)"
-            )
-        return await asyncio.to_thread(self.codex.set_model, model)
+    def set_poll_seconds(self, seconds: int | None) -> None:
+        if seconds is not None and (type(seconds) is not int or seconds <= 0):
+            raise ValueError("The probing interval must be a positive number of seconds")
+        if seconds == self.state.poll_seconds_override:
+            return
+        self.store.save(replace(self.state, poll_seconds_override=seconds))
+        self.state.poll_seconds_override = seconds
+        self._poll_wakeup.set()
 
     async def account_usage(self) -> AccountUsage:
         return await self.agentrouter.fetch_account_usage()
@@ -251,13 +240,28 @@ class Prober:
         return CycleResult(True, fatal or notification_fatal, sent)
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:
-        while not stop_event.is_set():
-            started = time.monotonic()
-            await self.run_cycle()
-            elapsed = time.monotonic() - started
-            delay = max(1, self.settings.poll_seconds - elapsed)
-            LOGGER.info("Next full model probe in %.0f seconds", delay)
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=delay)
-            except TimeoutError:
-                pass
+        async def wake_on_stop() -> None:
+            await stop_event.wait()
+            self._poll_wakeup.set()
+
+        stop_wakeup = asyncio.create_task(wake_on_stop())
+        try:
+            while not stop_event.is_set():
+                started = monotonic()
+                await self.run_cycle()
+                earliest_next_cycle = monotonic() + 1
+                while not stop_event.is_set():
+                    self._poll_wakeup.clear()
+                    next_cycle = max(started + self.poll_seconds, earliest_next_cycle)
+                    delay = next_cycle - monotonic()
+                    if delay <= 0:
+                        break
+                    LOGGER.info("Next full model probe in %.0f seconds", delay)
+                    try:
+                        async with asyncio.timeout(delay):
+                            await self._poll_wakeup.wait()
+                    except TimeoutError:
+                        pass
+        finally:
+            stop_wakeup.cancel()
+            await asyncio.gather(stop_wakeup, return_exceptions=True)

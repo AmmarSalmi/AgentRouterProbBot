@@ -2,9 +2,8 @@
 
 A Telegram bot that discovers the live AgentRouter model list from
 `/api/user/model-status` and sends one small greeting probe to every returned
-model through its advertised API. It reports model
-availability, reports the account balance and total consumption, and provides a
-picker for Codex's default model.
+model through its advertised API. It reports model availability, account
+balance, and total consumption.
 
 For a Linux VPS, follow the [VPS setup guide](VPS_SETUP.md).
 
@@ -23,16 +22,12 @@ You need:
 2. `TELEGRAM_BOT_TOKEN`: a bot token created through Telegram's `@BotFather`.
 3. `AGENTROUTER_DASHBOARD_TOKEN` and `AGENTROUTER_USER_ID`: the raw system
    access token generated in the AgentRouter dashboard and the matching
-   numeric account ID. The bot uses both for balance and model discovery,
-   including the live list used by availability probes and the Codex picker.
+   numeric account ID. The bot uses both to read the balance and discover
+   which models to probe.
 
 Leave `TELEGRAM_CHAT_ID` blank or omit it. The first person who sends `/start`
 in the bot's private chat becomes its saved recipient. An explicitly configured
 chat ID skips registration.
-
-The Codex picker requires an existing `config.toml` with a
-`[model_providers.AgentRouter]` provider. The config directory must be writable
-so the bot can create its backup and replace the file.
 
 ## Upgrading to v0.2.1
 
@@ -62,13 +57,13 @@ docker compose up -d --build prober
 
 ## Start with Docker
 
-Both Compose files default to `.env` in the repository directory on Windows
-and Linux. For a new install, copy `.env.example` to `.env` and fill in the
-credentials above. If you already have `.env.vps`, rename it to `.env` or copy
-its settings into your existing `.env`.
+The shared `compose.yaml` defaults to `.env` in the repository directory on
+Windows and Linux. For a new install, copy `.env.example` to `.env` and fill in
+the credentials above. If you already have `.env.vps`, rename it to `.env` or
+copy its settings into your existing `.env`.
 
-Prepare `data/` and `codex/` as described in the VPS guide, then run these
-commands from the repository directory. [VPS setup](VPS_SETUP.md#2-set-linux-permissions-and-credentials)
+Prepare a writable `data/` directory, then run these commands from the
+repository directory. [VPS setup](VPS_SETUP.md#2-set-linux-permissions-and-credentials)
 
 ```sh
 docker compose build
@@ -78,8 +73,6 @@ docker compose run --rm prober --once
 docker compose up -d
 docker compose logs -f prober
 ```
-
-Compose mounts the adjacent `data/` and `codex/` folders.
 
 `--test-telegram` needs only the Telegram configuration and sends a test message
 without contacting AgentRouter. `--once` performs one full model cycle after
@@ -92,8 +85,8 @@ Start. A queued `/start` works. Stop registration or active requests with Ctrl+C
 or `docker compose stop`; shutdown saves current state and pending alerts before
 closing the HTTP clients.
 
-The host's `data/` directory preserves `state.json` and `telegram.json` across
-restarts and `docker compose down`.
+Compose mounts `data/` at `/data` in the container. This directory preserves
+`state.json` and `telegram.json` across restarts and `docker compose down`.
 
 ## Run directly on Windows
 
@@ -103,19 +96,15 @@ $env:AGENTROUTER_API_KEY = "sk-replace-me"
 $env:AGENTROUTER_DASHBOARD_TOKEN = "replace-me"
 $env:AGENTROUTER_USER_ID = "12345"
 $env:TELEGRAM_BOT_TOKEN = "123456789:replace-me"
-$env:CODEX_CONFIG_PATH = "D:\ProgramFiles\Codex\config.toml"
 $env:STATE_PATH = "$PWD\data\state.json"
 agentrouter-prober
 ```
 
-Direct execution reads environment variables from the shell. Without
-`CODEX_CONFIG_PATH`, the config path is
-`CODEX_HOME/config.toml` when `CODEX_HOME` is set, otherwise
-`~/.codex/config.toml`.
+Direct execution reads environment variables from the shell.
 
-## Telegram menu, balance, and Codex model selection
+## Telegram commands
 
-The running bot offers five keyboard buttons and matching menu commands:
+The bot offers four keyboard buttons and matching commands.
 
 - **Status** (`/status`) shows each model name with ✅ for confirmed availability
   or ❌ otherwise. Detailed metrics, APIs, latency, timestamps, and errors remain
@@ -127,19 +116,14 @@ The running bot offers five keyboard buttons and matching menu commands:
   adds no model probes.
 - **Probe Now** (`/probe_now`, also `/probe`) refreshes model-status and probes
   every returned model immediately.
-- **Set Codex Model** (`/set_model`, also `/models`) offers only live models
-  advertising `responses`. Selecting one sets the top-level `model` and
-  `model_provider = "AgentRouter"` in the configured Codex file and creates
-  `config.toml.agentrouter-prober.bak` before replacing it. Restart an existing
-  Codex session to use the new default.
-- **Probing Schedule** (`/probing_schedule`, also `/schedule`) shows the cycle
-  interval and probe concurrency. Viewing it adds no model requests.
+- **Probing Schedule** (`/probing_schedule`, also `/schedule`) shows the current
+  interval and lets you choose 5, 15, or 30 minutes. Your choice reschedules the
+  next automatic probe and persists across restarts. Tap **Use default** to
+  restore the interval configured by `POLL_SECONDS`.
 
-Send `/start` again to show the keyboard. Commands and model-picker callbacks
-are accepted only from the registered user in that private chat. Other users,
-groups, and bots cannot run probes or change the Codex config. An explicitly
-configured group/channel can receive alerts, but commands require a private
-chat. Command replies and alerts share Telegram rate limits.
+Send `/start` to refresh the keyboard. The bot accepts commands from the
+registered user in a private chat. An explicitly configured group or channel
+can receive alerts. Command replies and alerts share Telegram rate limits.
 
 ## Registration
 
@@ -189,15 +173,14 @@ corrupt registration produces an error.
 | `AGENTROUTER_BASE_URL` | `https://agentrouter.org` | Status and model API host |
 | `TELEGRAM_CHAT_ID` | empty | Explicit destination; otherwise register via Start |
 | `TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | Telegram API host |
-| `CODEX_CONFIG_PATH` | Codex home config | Codex TOML; Compose sets `/codex/config.toml` |
 | `AGENTROUTER_DASHBOARD_TOKEN` | required | Dashboard access token for balance and model discovery |
 | `AGENTROUTER_USER_ID` | required | Positive account ID paired with the dashboard token |
-| `POLL_SECONDS` | `900` | Interval between full probe cycles |
+| `POLL_SECONDS` | `900` | Default interval between automatic probe cycles |
 | `PROBE_MAX_OUTPUT_TOKENS` | `32` | Output-token limit for each greeting |
 | `PROBE_REASONING_EFFORT` | `low` | `minimal`, `low`, `medium`, or `high` for Responses |
 | `PROBE_CONCURRENCY` | `2` | Maximum simultaneous model probes |
 | `REQUEST_TIMEOUT_SECONDS` | `90` | HTTP timeout |
-| `STATE_PATH` | `/data/state.json` | Saved results; registration uses the same directory |
+| `STATE_PATH` | `/data/state.json` | Saved probe results and interval choice. Registration uses the same directory. |
 | `HEALTH_MAX_AGE_SECONDS` | `3600` | Maximum age of a successful model-status read |
 | `AGENTROUTER_CLIENT_USER_AGENT` | `codex_cli_rs/0.171.0 (Windows 11; x86_64)` | Model client user agent |
 | `LOG_LEVEL` | `INFO` | Log level |
@@ -216,5 +199,4 @@ pip install -e ".[test]"
 pytest tests/
 ```
 
-The tests use mock HTTP transports and synthetic Codex configurations to run
-offline.
+The tests run offline with mock HTTP transports.

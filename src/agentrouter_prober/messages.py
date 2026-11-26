@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
-
 from .clients import AccountUsage
 from .config import Settings
 from .state import ModelRecord, PersistentState
@@ -11,17 +9,31 @@ TELEGRAM_COMMANDS = [
     {"command": "status", "description": "Show live model probes"},
     {"command": "balance", "description": "Show balance and usage"},
     {"command": "probe_now", "description": "Probe every listed model now"},
-    {"command": "set_model", "description": "Choose the Codex default model"},
-    {"command": "probing_schedule", "description": "Show the probing schedule"},
+    {"command": "probing_schedule", "description": "View or change the probing interval"},
 ]
 TELEGRAM_MENU = {
     "keyboard": [
         [{"text": "Status"}, {"text": "Probe Now"}],
-        [{"text": "Balance & Usage"}, {"text": "Set Codex Model"}],
-        [{"text": "Probing Schedule"}],
+        [{"text": "Balance & Usage"}, {"text": "Probing Schedule"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
+}
+SCHEDULE_CHOICES: dict[str, int | None] = {
+    **{f"every {minutes} min": minutes * 60 for minutes in (5, 15, 30)},
+    "use default": None,
+}
+TELEGRAM_SCHEDULE_MENU = {
+    "keyboard": [
+        [
+            {"text": label.capitalize()}
+            for label, seconds in SCHEDULE_CHOICES.items()
+            if seconds is not None
+        ],
+        [{"text": "Use default"}, {"text": "Back"}],
+    ],
+    "resize_keyboard": True,
+    "one_time_keyboard": True,
 }
 
 
@@ -34,7 +46,7 @@ def status_message(settings: Settings, state: PersistentState) -> str:
     return "\n".join(lines) or "No models checked yet."
 
 
-def _duration(seconds: int) -> str:
+def format_duration(seconds: int) -> str:
     hours, remainder = divmod(seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     parts = [
@@ -45,18 +57,13 @@ def _duration(seconds: int) -> str:
     return " ".join(parts) or "0 seconds"
 
 
-def probing_schedule_message(settings: Settings, now: datetime | None = None) -> str:
-    return "\n".join(
-        [
-            "Probing Schedule",
-            "",
-            f"Every {_duration(settings.poll_seconds)}, the bot:",
-            "1. Reads the AgentRouter dashboard's model list.",
-            "2. Sends one minimal greeting probe to every model listed there.",
-            "",
-            "Models from the documentation or pricing page are never added automatically.",
-            f"At most {settings.probe_concurrency} model probes run at once.",
-        ]
+def probing_schedule_message(poll_seconds: int, probe_concurrency: int) -> str:
+    return (
+        "Probing Schedule\n\n"
+        f"Every {format_duration(poll_seconds)}, the bot reads the AgentRouter dashboard's "
+        "model list and sends one greeting probe to every model listed there.\n"
+        f"At most {probe_concurrency} model probes run at once.\n\n"
+        "Choose an interval below."
     )
 
 

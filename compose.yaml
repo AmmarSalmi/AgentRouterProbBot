@@ -6,7 +6,6 @@ services:
     env_file:
       - ${ENV_FILE:-.env}
     environment:
-      CODEX_CONFIG_PATH: /codex/config.toml
       STATE_PATH: /data/state.json
     restart: unless-stopped
     init: true
@@ -17,11 +16,6 @@ services:
       - type: bind
         source: ./data
         target: /data
-        bind:
-          create_host_path: false
-      - type: bind
-        source: ./codex
-        target: /codex
         bind:
           create_host_path: false
     security_opt:

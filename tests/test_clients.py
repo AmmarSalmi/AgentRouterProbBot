@@ -30,7 +30,6 @@ def settings() -> Settings:
         health_max_age_seconds=3600,
         agentrouter_dashboard_token="dashboard-token",
         agentrouter_user_id=60923,
-        codex_config_path=Path("config.toml"),
         client_user_agent="codex_cli_rs/test",
     )
 
@@ -72,8 +71,8 @@ def test_status_uses_dashboard_token_and_parses_only_returned_models():
         ) as http:
             models = await AgentRouterClient(settings(), http).fetch_model_status()
             assert list(models) == ["gpt-6.2-sol", "claude-opus-5-5"]
-            assert models["gpt-6.2-sol"].codex_compatible
-            assert not models["claude-opus-5-5"].codex_compatible
+            assert models["gpt-6.2-sol"].apis == ("chat", "responses")
+            assert models["claude-opus-5-5"].apis == ("claude_native",)
             assert models["gpt-6.2-sol"].success_rate_24h == 99.5
 
     asyncio.run(run())

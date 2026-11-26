@@ -64,12 +64,14 @@ class PersistentState:
     last_successful_status_at: str | None = None
     last_error: str | None = None
     telegram_retry_at: str | None = None
+    poll_seconds_override: int | None = None
 
     def model(self, name: str) -> ModelRecord:
         return self.models.setdefault(name, ModelRecord())
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "PersistentState":
+        poll_seconds_override = raw.get("poll_seconds_override")
         models = {
             name: ModelRecord.from_dict(record)
             for name, record in raw.get("models", {}).items()
@@ -85,6 +87,11 @@ class PersistentState:
             last_successful_status_at=raw.get("last_successful_status_at"),
             last_error=raw.get("last_error"),
             telegram_retry_at=raw.get("telegram_retry_at"),
+            poll_seconds_override=(
+                poll_seconds_override
+                if type(poll_seconds_override) is int and poll_seconds_override > 0
+                else None
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -98,6 +105,7 @@ class PersistentState:
             "last_successful_status_at": self.last_successful_status_at,
             "last_error": self.last_error,
             "telegram_retry_at": self.telegram_retry_at,
+            "poll_seconds_override": self.poll_seconds_override,
         }
 
 

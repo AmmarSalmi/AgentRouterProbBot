@@ -6,11 +6,13 @@ from typing import Any
 
 from .app import Prober
 from .clients import ClientError, TransientClientError
-from .codex import CodexConfigError
 from .messages import (
+    SCHEDULE_CHOICES,
     TELEGRAM_COMMANDS,
     TELEGRAM_MENU,
+    TELEGRAM_SCHEDULE_MENU,
     account_usage_message,
+    format_duration,
     probing_schedule_message,
     status_message,
     telegram_message_parts,
@@ -76,46 +78,24 @@ class TelegramCommands:
                 "/usage": "balance",
                 "/probe_now": "probe",
                 "/probe": "probe",
-                "/set_model": "codex",
-                "/models": "codex",
                 "/probing_schedule": "schedule",
                 "/schedule": "schedule",
             }.get(command.lower())
+        text = " ".join(text.lower().split())
+        if text in SCHEDULE_CHOICES:
+            return text
         return {
             "status": "status",
             "balance": "balance",
             "balance & usage": "balance",
             "usage": "balance",
             "probe now": "probe",
-            "set codex model": "codex",
             "probing schedule": "schedule",
-        }.get(" ".join(text.lower().split()))
-
-    def _callback_model(self, update: dict[str, Any]) -> tuple[str, str] | None:
-        query = update.get("callback_query")
-        if self.owner_id is None or not isinstance(query, dict):
-            return None
-        sender, message = query.get("from"), query.get("message")
-        chat = message.get("chat") if isinstance(message, dict) else None
-        data, query_id = query.get("data"), query.get("id")
-        if (
-            not isinstance(sender, dict)
-            or sender.get("is_bot") is not False
-            or sender.get("id") != self.owner_id
-            or not isinstance(chat, dict)
-            or chat.get("type") != "private"
-            or chat.get("id") != self.owner_id
-            or not isinstance(data, str)
-            or not data.startswith("codex:")
-            or not isinstance(query_id, str)
-            or not query_id
-        ):
-            return None
-        model = data.removeprefix("codex:")
-        return query_id, model
+            "back": "menu",
+        }.get(text)
 
     async def _reply(
-        self, text: str, *, reply_markup: dict[str, Any] | None = TELEGRAM_MENU
+        self, text: str, *, reply_markup: dict[str, Any] = TELEGRAM_MENU
     ) -> None:
         parts = telegram_message_parts(text)
         for index, part in enumerate(parts):
@@ -129,63 +109,7 @@ class TelegramCommands:
 
             await _retry(send_part, "Telegram command reply")
 
-    async def _codex_menu(self) -> None:
-        if not self.prober.has_model_status:
-            await self._reply("Loading the current AgentRouter model list…")
-            await self.prober.status_snapshot()
-        options = self.prober.codex_model_options
-        try:
-            current = (await self.prober.codex_config()).model
-        except CodexConfigError as exc:
-            await self._reply(str(exc))
-            return
-        if not options:
-            await self._reply(
-                "No model currently listed on model-status advertises the Responses API, "
-                "so none can be selected for Codex."
-            )
-            return
-        rows = []
-        for model in options:
-            callback = f"codex:{model}"
-            if len(callback.encode("utf-8")) > 64:
-                continue
-            rows.append(
-                [
-                    {
-                        "text": f"{'✓ ' if model == current else ''}{model}",
-                        "callback_data": callback,
-                    }
-                ]
-            )
-        incompatible = [
-            model
-            for model in self.prober.state.active_models
-            if model not in options
-        ]
-        text = "Choose the default model for Codex. Only Responses API models are shown."
-        if current:
-            text += f"\n\nCurrent: {current}"
-        if incompatible:
-            text += "\n\nNot Codex-compatible: " + ", ".join(incompatible)
-        await self._reply(text, reply_markup={"inline_keyboard": rows})
-
     async def handle_update(self, update: dict[str, Any]) -> None:
-        callback = self._callback_model(update)
-        if callback is not None:
-            query_id, model = callback
-            await self.telegram.answer_callback_query(query_id, "Updating Codex…")
-            try:
-                config = await self.prober.set_codex_model(model)
-            except CodexConfigError as exc:
-                await self._reply(f"Codex model was not changed: {exc}")
-            else:
-                await self._reply(
-                    f"Codex default model is now {config.model}.\n"
-                    "New Codex sessions will use it; restart an existing session to switch."
-                )
-            return
-
         command = self._message_command(update)
         if command == "status":
             if not self.prober.has_model_status:
@@ -204,14 +128,29 @@ class TelegramCommands:
             await self._reply("Refreshing model-status and probing every listed model…")
             await self.prober.run_cycle()
             await self._reply(status_message(self.prober.settings, self.prober.state))
-        elif command == "codex":
-            await self._codex_menu()
         elif command == "schedule":
-            await self._reply(probing_schedule_message(self.prober.settings))
+            await self._reply(
+                probing_schedule_message(
+                    self.prober.poll_seconds, self.prober.settings.probe_concurrency
+                ),
+                reply_markup=TELEGRAM_SCHEDULE_MENU,
+            )
+        elif command is not None and command in SCHEDULE_CHOICES:
+            try:
+                self.prober.set_poll_seconds(SCHEDULE_CHOICES[command])
+            except OSError:
+                LOGGER.exception("Could not save the probing interval")
+                await self._reply(
+                    "The probing interval could not be saved. Try again.",
+                    reply_markup=TELEGRAM_SCHEDULE_MENU,
+                )
+            else:
+                await self._reply(
+                    f"Automatic probes every {format_duration(self.prober.poll_seconds)}."
+                )
         elif command == "menu":
             await self._reply(
-                "Choose Status, Probe Now, Balance & Usage, Set Codex Model, "
-                "or Probing Schedule below."
+                "Choose Status, Probe Now, Balance & Usage, or Probing Schedule below."
             )
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:

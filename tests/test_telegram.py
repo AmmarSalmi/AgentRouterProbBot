@@ -95,7 +95,7 @@ def test_first_private_start_wins_and_survives_restart_and_token_rotation(state_
         if method == "getMe":
             return identity()
         if method == "getUpdates":
-            assert data["allowed_updates"] == ["message", "callback_query"]
+            assert data["allowed_updates"] == ["message"]
             if "offset" not in data:
                 assert data["timeout"] == 10
                 assert request.extensions["timeout"]["read"] >= 15

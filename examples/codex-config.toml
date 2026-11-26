@@ -1,8 +1,0 @@
-model = "gpt-6.1-sol"
-model_provider = "AgentRouter"
-
-[model_providers.AgentRouter]
-name = "AgentRouter"
-base_url = "https://agentrouter.org/v1"
-env_key = "AGENTROUTER_API_KEY"
-wire_api = "responses"

@@ -61,10 +61,6 @@ class ModelObservation:
             return "candidate"
         return "unknown"
 
-    @property
-    def codex_compatible(self) -> bool:
-        return "responses" in self.apis
-
 
 @dataclass(frozen=True)
 class ModelProbe:
@@ -620,7 +616,7 @@ class TelegramClient:
     ) -> list[dict[str, Any]]:
         data: dict[str, Any] = {
             "timeout": timeout,
-            "allowed_updates": ["message", "callback_query"],
+            "allowed_updates": ["message"],
         }
         if offset is not None:
             data["offset"] = offset
@@ -633,14 +629,6 @@ class TelegramClient:
         ):
             raise ProtocolError("Telegram returned invalid updates")
         return sorted(result, key=lambda update: update["update_id"])
-
-    async def answer_callback_query(self, query_id: str, text: str | None = None) -> None:
-        data: dict[str, Any] = {"callback_query_id": query_id}
-        if text:
-            data["text"] = text[:200]
-        result = await self._request("answerCallbackQuery", data)
-        if result is not True:
-            raise ProtocolError("Telegram did not accept the callback answer")
 
     async def send(
         self, text: str, *, reply_markup: dict[str, Any] | None = None

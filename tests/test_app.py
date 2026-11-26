@@ -30,7 +30,6 @@ def make_settings(path: Path) -> Settings:
         health_max_age_seconds=3600,
         agentrouter_dashboard_token="dashboard-token",
         agentrouter_user_id=1,
-        codex_config_path=path.with_name("config.toml"),
         client_user_agent="codex_cli_rs/test",
     )
 
@@ -70,6 +69,36 @@ class FakeTelegram:
 
     async def close(self):
         return None
+
+
+def test_changing_interval_reschedules_an_overdue_probe(state_directory, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(prober_app, "monotonic", lambda: clock[0])
+    prober = Prober(
+        make_settings(state_directory / "state.json"),
+        FakeAgentRouter([], []),
+        FakeTelegram(),
+    )
+
+    async def run():
+        cycles = asyncio.Queue()
+        stop = asyncio.Event()
+
+        async def run_cycle():
+            cycles.put_nowait(clock[0])
+
+        monkeypatch.setattr(prober, "run_cycle", run_cycle)
+        worker = asyncio.create_task(prober.run_forever(stop))
+        try:
+            assert await asyncio.wait_for(cycles.get(), timeout=1) == 0
+            clock[0] = 600
+            prober.set_poll_seconds(300)
+            assert await asyncio.wait_for(cycles.get(), timeout=1) == 600
+        finally:
+            stop.set()
+            await asyncio.wait_for(worker, timeout=1)
+
+    asyncio.run(run())
 
 
 def test_every_status_model_is_probed_on_every_cycle_and_notified_once(state_directory):
