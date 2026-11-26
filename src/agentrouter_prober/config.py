@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -75,6 +76,7 @@ class Settings:
     health_max_age_seconds: int
     client_user_agent: str
     reasoning_effort: str = "low"
+    probe_key_low_balance_usd: Decimal = Decimal("1.00")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -83,6 +85,14 @@ class Settings:
             raise ConfigurationError(
                 "PROBE_REASONING_EFFORT must be minimal, low, medium, or high"
             )
+        raw_threshold = os.getenv("PROBE_KEY_LOW_BALANCE_USD", "").strip() or "1.00"
+        threshold_error = "PROBE_KEY_LOW_BALANCE_USD must be a positive USD amount"
+        try:
+            key_alert_threshold = Decimal(raw_threshold)
+        except InvalidOperation as exc:
+            raise ConfigurationError(threshold_error) from exc
+        if not key_alert_threshold.is_finite() or key_alert_threshold <= 0:
+            raise ConfigurationError(threshold_error)
 
         return cls(
             agentrouter_base_url=_url(
@@ -107,4 +117,5 @@ class Settings:
                 "codex_cli_rs/0.171.0 (Windows 11; x86_64)",
             ).strip(),
             reasoning_effort=reasoning_effort,
+            probe_key_low_balance_usd=key_alert_threshold,
         )

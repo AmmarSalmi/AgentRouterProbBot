@@ -34,8 +34,18 @@ def install_transport(monkeypatch, handler):
     real_client = httpx.AsyncClient
     clients = []
 
+    def respond(request):
+        if request.url.host == "agentrouter.test" and request.url.path == "/api/token/":
+            assert request.headers["Authorization"] == "Bearer dashboard-token"
+            assert request.headers["New-Api-User"] == "60923"
+            return httpx.Response(200, json={
+                "success": True,
+                "data": {"items": [{"key": "test", "unlimited_quota": True}]},
+            })
+        return handler(request)
+
     def make_client(**kwargs):
-        client = real_client(transport=httpx.MockTransport(handler), **kwargs)
+        client = real_client(transport=httpx.MockTransport(respond), **kwargs)
         clients.append(client)
         return client
 

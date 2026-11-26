@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
 from math import ceil
 from time import monotonic
 
@@ -22,11 +23,17 @@ from .clients import (
     TransientClientError,
 )
 from .config import Settings
-from .messages import availability_message, credit_alert_message, telegram_message_parts
+from .messages import (
+    availability_message,
+    credit_alert_message,
+    probe_key_balance_message,
+    telegram_message_parts,
+)
 from .state import (
     CreditAlert,
     CreditAlertKind,
     PersistentState,
+    ProbeKeyAlert,
     StateStore,
     format_datetime,
     parse_datetime,
@@ -62,6 +69,11 @@ class Prober:
         self.telegram = telegram
         self.store = store or StateStore(settings.state_path)
         self.state: PersistentState = self.store.load()
+        key_identity = (
+            f"{settings.agentrouter_base_url}\0{settings.agentrouter_user_id}"
+            f"\0{settings.agentrouter_api_key.removeprefix('sk-')}"
+        )
+        self._probe_key_fingerprint = sha256(key_identity.encode()).hexdigest()
         self._cycle_lock = asyncio.Lock()
         self._poll_wakeup = asyncio.Event()
         self.telegram.send_retry_at = parse_datetime(self.state.telegram_retry_at)
@@ -159,6 +171,33 @@ class Prober:
                     alert, pending_message=credit_alert_message(kind, usage, threshold)
                 )
 
+    async def _check_probe_key_balance(self) -> None:
+        chat_id = self.telegram.chat_id
+        alert = self.state.probe_key_alert
+        if alert and (
+            alert.chat_id != chat_id or alert.key_fingerprint != self._probe_key_fingerprint
+        ):
+            alert = None
+            self.state.probe_key_alert = None
+        if not chat_id:
+            return
+
+        try:
+            balance = await self.agentrouter.fetch_probe_key_balance()
+        except ClientError as exc:
+            LOGGER.warning("AgentRouter probe key balance check failed: %s", exc)
+            return
+
+        threshold = self.settings.probe_key_low_balance_usd
+        if balance is None or balance >= threshold:
+            self.state.probe_key_alert = None
+        elif alert is None or alert.pending_message is not None:
+            self.state.probe_key_alert = ProbeKeyAlert(
+                self._probe_key_fingerprint,
+                chat_id,
+                probe_key_balance_message(balance, threshold),
+            )
+
     async def status_snapshot(self) -> PersistentState:
         was_running = self._cycle_lock.locked()
         async with self._cycle_lock:
@@ -190,7 +229,9 @@ class Prober:
             for kind, alert in self._current_credit_alerts().items()
             if alert.pending_message is not None
         ]
-        if not pending_models and not credit_notifications:
+        probe_key_alert = self.state.probe_key_alert
+        probe_key_message = probe_key_alert.pending_message if probe_key_alert else None
+        if not (pending_models or credit_notifications or probe_key_message):
             return 0, False
         retry_at = parse_datetime(self.state.telegram_retry_at)
         if retry_at is not None and utc_now() < retry_at:
@@ -214,6 +255,10 @@ class Prober:
                 sent += 1
                 if self.state.credit_alerts.get(kind) is alert:
                     del self.state.credit_alerts[kind]
+            if probe_key_alert and probe_key_message:
+                await self.telegram.send(probe_key_message)
+                sent += 1
+                self.state.probe_key_alert = replace(probe_key_alert, pending_message=None)
         except TransientClientError as exc:
             self.state.last_error = str(exc)
             LOGGER.warning("Telegram notification will be retried: %s", exc)
@@ -235,6 +280,7 @@ class Prober:
         try:
             dashboard_ok, fatal = await self._probe_models(cycle_time)
             await self._check_credit_alerts()
+            await self._check_probe_key_balance()
             sent, notification_fatal = await self._deliver_pending_notifications(cycle_time)
             return CycleResult(dashboard_ok, fatal or notification_fatal, sent)
         finally:

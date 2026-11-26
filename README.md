@@ -22,38 +22,13 @@ You need:
 2. `TELEGRAM_BOT_TOKEN`: a bot token created through Telegram's `@BotFather`.
 3. `AGENTROUTER_DASHBOARD_TOKEN` and `AGENTROUTER_USER_ID`: the raw system
    access token generated in the AgentRouter dashboard and the matching
-   numeric account ID. The bot uses both to read the balance and discover
-   which models to probe.
+   numeric account ID. The bot sends them as `Authorization: Bearer <token>`
+   and `New-Api-User: <account-id>` to read the balance and discover which
+   models to probe.
 
 Leave `TELEGRAM_CHAT_ID` blank or omit it. The first person who sends `/start`
 in the bot's private chat becomes its saved recipient. An explicitly configured
 chat ID skips registration.
-
-## Upgrading to v0.2.1
-
-Earlier versions could authenticate dashboard requests through a Zen browser
-profile or a session cookie. Starting with `v0.2.1`, the bot sends the raw
-AgentRouter dashboard access token as `Authorization: Bearer <token>` and the
-matching numeric account ID as `New-Api-User: <account-id>` to read balance and
-model status.
-
-In your Compose environment file, set the access token generated in the
-AgentRouter dashboard and the numeric ID for the same account.
-
-```dotenv
-AGENTROUTER_DASHBOARD_TOKEN=your-dashboard-access-token
-AGENTROUTER_USER_ID=12345
-```
-
-Remove `ZEN_PROFILE_PATH` and `AGENTROUTER_SESSION_COOKIE` from that file. If
-you use a custom Compose file, remove its `/zen-profile` mount. The bot uses
-`AGENTROUTER_API_KEY` for live model probes and `TELEGRAM_BOT_TOKEN` for Telegram.
-
-From the updated checkout, rebuild and restart the service.
-
-```sh
-docker compose up -d --build prober
-```
 
 ## Start with Docker
 
@@ -105,7 +80,8 @@ Direct execution reads environment variables from the shell.
 ## Telegram commands
 
 Tap **Help** (`/help`) for a quick guide in Telegram. The bot probes AgentRouter
-models automatically and sends alerts when availability changes.
+models automatically and sends alerts when availability changes or the
+probing key is low on quota.
 
 - **Status** (`/status`) shows the latest model availability results. A ✅ marks
   confirmed availability, and other results appear as ❌. Status waits for a
@@ -144,6 +120,13 @@ number for quota units.
 The bot checks credit alerts during each full probe cycle. It saves one alert
 of each type across restarts. Setting another alert of the same type replaces
 the previous one. An alert clears after Telegram accepts it.
+
+The bot also checks the API key used for model probes. It reads the key's
+remaining quota from the dashboard's key list and sends a Telegram warning
+when a limited key falls below $1.00 by default. Set `PROBE_KEY_LOW_BALANCE_USD`
+to change the threshold. The warning fires once per low-quota period and
+rearms when the quota recovers to the threshold. Unlimited keys have no
+per-key balance to monitor.
 
 ## Registration
 
@@ -199,6 +182,7 @@ corrupt registration produces an error.
 | `PROBE_MAX_OUTPUT_TOKENS` | `32` | Output-token limit for each greeting |
 | `PROBE_REASONING_EFFORT` | `low` | `minimal`, `low`, `medium`, or `high` for Responses |
 | `PROBE_CONCURRENCY` | `2` | Maximum simultaneous model probes |
+| `PROBE_KEY_LOW_BALANCE_USD` | `1.00` | Warn when the probing key's remaining quota falls below this USD amount |
 | `REQUEST_TIMEOUT_SECONDS` | `90` | HTTP timeout |
 | `STATE_PATH` | `/data/state.json` | Saved probe results, interval choice, and credit alerts. Registration uses the same directory. |
 | `HEALTH_MAX_AGE_SECONDS` | `3600` | Maximum age of a successful model-status read |

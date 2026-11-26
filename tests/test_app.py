@@ -41,10 +41,11 @@ def observation(name: str, apis=("responses",), status="operational"):
 
 
 class FakeAgentRouter:
-    def __init__(self, statuses, outcomes, account_usages=()):
+    def __init__(self, statuses, outcomes, account_usages=(), probe_key_balances=()):
         self.statuses = list(statuses)
         self.outcomes = list(outcomes)
         self.account_usages = list(account_usages)
+        self.probe_key_balances = list(probe_key_balances)
         self.account_calls = 0
         self.probed = []
 
@@ -60,6 +61,12 @@ class FakeAgentRouter:
         if isinstance(usage, Exception):
             raise usage
         return usage
+
+    async def fetch_probe_key_balance(self):
+        balance = self.probe_key_balances.pop(0) if self.probe_key_balances else None
+        if isinstance(balance, Exception):
+            raise balance
+        return balance
 
     async def probe_model(self, model):
         self.probed.append(model.name)
@@ -123,6 +130,44 @@ def test_credit_alerts_survive_restart_and_trigger_once_from_live_usage(state_di
         "Low balance alert\n\nYour balance is $9.50, below $10.00. Total used is $18.00.",
     ]
     assert StateStore(settings.state_path).load().credit_alerts == {}
+
+
+def test_probe_key_warning_retries_and_rearms_after_quota_recovers(state_directory):
+    settings = make_settings(state_directory / "state.json")
+
+    class UnavailableTelegram(FakeTelegram):
+        async def send(self, text, **kwargs):
+            raise TransientClientError("Telegram temporarily unavailable")
+
+    async def run():
+        agent = FakeAgentRouter(
+            [{}] * 6,
+            [],
+            probe_key_balances=[
+                Decimal("0.75"),
+                TransientClientError("Key quota temporarily unavailable"),
+                Decimal("0.50"),
+                Decimal("1.00"),
+                Decimal("0"),
+                None,
+            ],
+        )
+        prober = Prober(settings, agent, UnavailableTelegram())
+        assert (await prober.run_cycle()).notifications_sent == 0
+
+        telegram = FakeTelegram()
+        for expected in (1, 0, 0, 1, 0):
+            restarted = Prober(settings, agent, telegram)
+            result = await restarted.run_cycle()
+            assert result.notifications_sent == expected
+            assert not result.fatal_error
+        assert len(telegram.messages) == 2
+        assert "$0.75 in quota left" in telegram.messages[0]
+        assert "$0.00 in quota left" in telegram.messages[1]
+        assert all("threshold is $1.00" in message for message in telegram.messages)
+        assert StateStore(settings.state_path).load().probe_key_alert is None
+
+    asyncio.run(run())
 
 
 def test_pending_credit_alert_retries_for_its_recipient_after_restart(

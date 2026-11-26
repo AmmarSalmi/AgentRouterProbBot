@@ -26,7 +26,7 @@ TELEGRAM_MENU = {
 }
 TELEGRAM_HELP = (
     "The bot probes AgentRouter models automatically and sends alerts when "
-    "availability changes.\n\n"
+    "availability changes or the probing key is low on quota.\n\n"
     "• Status (/status) shows the latest model availability results.\n"
     "• Probe Now (/probe_now) refreshes the model list and probes every listed model immediately.\n"
     "• Balance & Usage (/balance) shows your balance, total usage, request count, and account group.\n"
@@ -96,6 +96,14 @@ def format_account_amount(usage: AccountUsage, quota: int) -> str:
         amount = Decimal(quota) / Decimal(str(usage.quota_per_unit))
         return f"${amount:,.2f}"
     return f"{quota:,} quota"
+
+
+def probe_key_balance_message(balance: Decimal, threshold: Decimal) -> str:
+    return (
+        "Low probing key balance\n\n"
+        f"The API key used for model probes has about ${balance:,.2f} in quota left. "
+        f"The warning threshold is ${threshold:,.2f}."
+    )
 
 
 def account_usage_message(usage: AccountUsage) -> str:

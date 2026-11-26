@@ -70,6 +70,9 @@ class FakeAgent:
         self.account_calls += 1
         return AccountUsage(6250000, 2500000, 321, "vip", 500000.0, True)
 
+    async def fetch_probe_key_balance(self):
+        return None
+
     async def probe_model(self, observation):
         self.probed.append(observation.name)
         available = observation.name == "gpt-6.1-sol"

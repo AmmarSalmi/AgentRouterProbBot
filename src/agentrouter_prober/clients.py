@@ -5,6 +5,7 @@ import math
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from enum import Enum
 from typing import Any
 
@@ -334,6 +335,47 @@ class AgentRouterClient:
             quota_per_unit=quota_per_unit,
             display_in_currency=display_in_currency,
         )
+
+    async def fetch_probe_key_balance(self) -> Decimal | None:
+        """Return the configured model key's remaining USD quota, or None if unlimited."""
+        key = self.settings.agentrouter_api_key.removeprefix("sk-")
+        page = 1
+        while True:
+            payload = await self._dashboard_payload(
+                f"/api/token/?p={page}",
+                referer=f"{self.settings.agentrouter_base_url}/console/token",
+                label="API key list",
+            )
+            data = payload.get("data")
+            if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+                raise ProtocolError("API key list did not contain key records")
+
+            for record in data["items"]:
+                stored_key = record.get("key") if isinstance(record, dict) else None
+                if not isinstance(stored_key, str) or stored_key.removeprefix("sk-") != key:
+                    continue
+                unlimited = record.get("unlimited_quota")
+                if unlimited is True:
+                    return None
+                remaining = record.get("remain_quota")
+                if unlimited is not False or type(remaining) is not int:
+                    raise ProtocolError("API key list did not contain valid probe key quota")
+                quota_per_unit, _ = await self._quota_display_settings()
+                return Decimal(remaining) / Decimal(str(quota_per_unit))
+
+            page_size = data.get("page_size")
+            total = data.get("total")
+            if (
+                data.get("page") != page
+                or type(page_size) is not int
+                or page_size <= 0
+                or type(total) is not int
+                or total < 0
+            ):
+                raise ProtocolError("API key list did not contain valid pagination")
+            if page * page_size >= total:
+                raise ProtocolError("Configured probe key was not found in the dashboard key list")
+            page += 1
 
     async def fetch_model_status(self) -> dict[str, ModelObservation]:
         payload = await self._dashboard_payload(

@@ -86,6 +86,24 @@ class CreditAlert:
         )
 
 
+@dataclass(frozen=True)
+class ProbeKeyAlert:
+    key_fingerprint: str
+    chat_id: str
+    pending_message: str | None
+
+    @classmethod
+    def from_dict(cls, raw: object) -> ProbeKeyAlert | None:
+        if not isinstance(raw, dict):
+            return None
+        fingerprint = raw.get("key_fingerprint")
+        chat_id = raw.get("chat_id")
+        message = raw.get("pending_message")
+        if not isinstance(fingerprint, str) or not isinstance(chat_id, str):
+            return None
+        return cls(fingerprint, chat_id, message if isinstance(message, str) else None)
+
+
 @dataclass
 class PersistentState:
     version: int = 2
@@ -97,6 +115,7 @@ class PersistentState:
     telegram_retry_at: str | None = None
     poll_seconds_override: int | None = None
     credit_alerts: dict[CreditAlertKind, CreditAlert] = field(default_factory=dict)
+    probe_key_alert: ProbeKeyAlert | None = None
 
     def model(self, name: str) -> ModelRecord:
         return self.models.setdefault(name, ModelRecord())
@@ -132,6 +151,7 @@ class PersistentState:
                 else None
             ),
             credit_alerts=credit_alerts,
+            probe_key_alert=ProbeKeyAlert.from_dict(raw.get("probe_key_alert")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -149,6 +169,7 @@ class PersistentState:
             "credit_alerts": {
                 kind: asdict(alert) for kind, alert in self.credit_alerts.items()
             },
+            "probe_key_alert": asdict(self.probe_key_alert) if self.probe_key_alert else None,
         }
 
 

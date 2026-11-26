@@ -1,4 +1,5 @@
 import asyncio
+from decimal import Decimal
 from pathlib import Path
 
 import httpx
@@ -122,6 +123,37 @@ def test_account_usage_reads_balance_and_consumption():
             assert paths == ["/api/user/self", "/api/status"]
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("unlimited", [False, True])
+def test_probe_key_balance_matches_the_configured_key_across_dashboard_pages(unlimited):
+    paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/status":
+            assert "authorization" not in request.headers
+            return httpx.Response(200, json={"data": {"quota_per_unit": 600_000}})
+        assert request.url.path == "/api/token/"
+        assert request.headers["Authorization"] == "Bearer dashboard-token"
+        assert request.headers["New-Api-User"] == "60923"
+        assert "cookie" not in request.headers
+        page = int(request.url.params["p"])
+        records = {
+            1: {"key": "different-test", "remain_quota": 0, "unlimited_quota": False},
+            2: {"key": "test", "remain_quota": 450_000, "unlimited_quota": unlimited},
+        }
+        return httpx.Response(200, json={
+            "success": True,
+            "data": {"items": [records[page]], "page": page, "page_size": 1, "total": 2},
+        })
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            return await AgentRouterClient(settings(), http).fetch_probe_key_balance()
+
+    assert asyncio.run(run()) == (None if unlimited else Decimal("0.75"))
+    assert paths == (["/api/token/"] * 2 + ([] if unlimited else ["/api/status"]))
 
 
 @pytest.mark.parametrize(
