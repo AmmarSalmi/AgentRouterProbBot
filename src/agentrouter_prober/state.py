@@ -5,10 +5,12 @@ import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 
 UTC = timezone.utc
+CreditAlertKind = Literal["spending", "balance"]
+CREDIT_ALERT_KINDS: tuple[CreditAlertKind, ...] = ("spending", "balance")
 
 
 def utc_now() -> datetime:
@@ -55,6 +57,35 @@ class ModelRecord:
         return cls(**{key: raw[key] for key in allowed if key in raw})
 
 
+@dataclass(frozen=True)
+class CreditAlert:
+    threshold_quota: int
+    chat_id: str
+    account_id: int
+    pending_message: str | None = None
+
+    @classmethod
+    def from_dict(cls, raw: object) -> CreditAlert | None:
+        if not isinstance(raw, dict):
+            return None
+        threshold = raw.get("threshold_quota")
+        chat_id = raw.get("chat_id")
+        account_id = raw.get("account_id")
+        message = raw.get("pending_message")
+        if (
+            type(threshold) is not int
+            or threshold <= 0
+            or not isinstance(chat_id, str)
+            or not chat_id
+            or type(account_id) is not int
+            or account_id <= 0
+        ):
+            return None
+        return cls(
+            threshold, chat_id, account_id, message if isinstance(message, str) and message else None
+        )
+
+
 @dataclass
 class PersistentState:
     version: int = 2
@@ -65,6 +96,7 @@ class PersistentState:
     last_error: str | None = None
     telegram_retry_at: str | None = None
     poll_seconds_override: int | None = None
+    credit_alerts: dict[CreditAlertKind, CreditAlert] = field(default_factory=dict)
 
     def model(self, name: str) -> ModelRecord:
         return self.models.setdefault(name, ModelRecord())
@@ -72,6 +104,13 @@ class PersistentState:
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "PersistentState":
         poll_seconds_override = raw.get("poll_seconds_override")
+        credit_alerts: dict[CreditAlertKind, CreditAlert] = {}
+        stored_alerts = raw.get("credit_alerts")
+        if isinstance(stored_alerts, dict):
+            for kind in CREDIT_ALERT_KINDS:
+                alert = CreditAlert.from_dict(stored_alerts.get(kind))
+                if alert is not None:
+                    credit_alerts[kind] = alert
         models = {
             name: ModelRecord.from_dict(record)
             for name, record in raw.get("models", {}).items()
@@ -92,6 +131,7 @@ class PersistentState:
                 if type(poll_seconds_override) is int and poll_seconds_override > 0
                 else None
             ),
+            credit_alerts=credit_alerts,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -106,6 +146,9 @@ class PersistentState:
             "last_error": self.last_error,
             "telegram_retry_at": self.telegram_retry_at,
             "poll_seconds_override": self.poll_seconds_override,
+            "credit_alerts": {
+                kind: asdict(alert) for kind, alert in self.credit_alerts.items()
+            },
         }
 
 

@@ -1,10 +1,12 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 from agentrouter_prober import app as prober_app
 from agentrouter_prober.app import Prober
 from agentrouter_prober.clients import (
+    AccountUsage,
     ModelObservation,
     ModelProbe,
     ProbeOutcome,
@@ -39,13 +41,25 @@ def observation(name: str, apis=("responses",), status="operational"):
 
 
 class FakeAgentRouter:
-    def __init__(self, statuses, outcomes):
+    def __init__(self, statuses, outcomes, account_usages=()):
         self.statuses = list(statuses)
         self.outcomes = list(outcomes)
+        self.account_usages = list(account_usages)
+        self.account_calls = 0
         self.probed = []
 
     async def fetch_model_status(self):
-        return self.statuses.pop(0)
+        status = self.statuses.pop(0)
+        if isinstance(status, Exception):
+            raise status
+        return status
+
+    async def fetch_account_usage(self):
+        self.account_calls += 1
+        usage = self.account_usages.pop(0)
+        if isinstance(usage, Exception):
+            raise usage
+        return usage
 
     async def probe_model(self, model):
         self.probed.append(model.name)
@@ -59,6 +73,7 @@ class FakeAgentRouter:
 
 
 class FakeTelegram:
+    chat_id = "42"
     send_retry_at = None
 
     def __init__(self):
@@ -69,6 +84,124 @@ class FakeTelegram:
 
     async def close(self):
         return None
+
+
+def account_usage(balance: int, used: int) -> AccountUsage:
+    return AccountUsage(balance, used, 0, "", 500_000.0, True)
+
+
+def test_credit_alerts_survive_restart_and_trigger_once_from_live_usage(state_directory):
+    settings = make_settings(state_directory / "state.json")
+    initial = account_usage(6_250_000, 2_500_000)
+    setup_agent = FakeAgentRouter([], [], [initial, initial])
+    telegram = FakeTelegram()
+
+    async def run():
+        prober = Prober(settings, setup_agent, telegram)
+        await prober.set_credit_alert("spending", Decimal("2.50"))
+        await prober.set_credit_alert("balance", Decimal("10"))
+
+        monitor = FakeAgentRouter(
+            [{}] * 6,
+            [],
+            [
+                TransientClientError("Account service unavailable"),
+                account_usage(5_000_000, 3_749_999),
+                account_usage(10_000_000, 3_750_000),
+                account_usage(-1, 4_000_000),
+                account_usage(4_750_000, 9_000_000),
+            ],
+        )
+        restarted = Prober(settings, monitor, telegram)
+        sent = [(await restarted.run_cycle()).notifications_sent for _ in range(6)]
+        assert sent == [0, 0, 1, 0, 1, 0]
+        assert monitor.account_calls == 5
+
+    asyncio.run(run())
+    assert telegram.messages == [
+        "Spending alert\n\nYou’ve used $7.50 in total, reaching your $7.50 target.",
+        "Low balance alert\n\nYour balance is $9.50, below $10.00. Total used is $18.00.",
+    ]
+    assert StateStore(settings.state_path).load().credit_alerts == {}
+
+
+def test_pending_credit_alert_retries_for_its_recipient_after_restart(
+    state_directory, monkeypatch
+):
+    settings = make_settings(state_directory / "state.json")
+    clock = [datetime(2026, 11, 21, 7, 0, tzinfo=UTC)]
+    monkeypatch.setattr(prober_app, "utc_now", lambda: clock[0])
+
+    class RateLimitedTelegram(FakeTelegram):
+        async def send(self, text, **kwargs):
+            raise TransientClientError("Telegram rate limit reached", retry_after=60)
+
+    async def run():
+        agent = FakeAgentRouter(
+            [TransientClientError("Model-status unavailable")],
+            [],
+            [account_usage(6_250_000, 2_500_000), account_usage(4_750_000, 4_000_000)],
+        )
+        prober = Prober(settings, agent, RateLimitedTelegram())
+        await prober.set_credit_alert("balance", Decimal("10"))
+        result = await prober.run_cycle()
+        assert not result.dashboard_ok and not result.fatal_error
+        assert result.notifications_sent == 0
+        saved = StateStore(settings.state_path).load()
+        assert "$9.50" in saved.credit_alerts["balance"].pending_message
+        assert saved.telegram_retry_at == format_datetime(clock[0] + timedelta(seconds=60))
+
+        monitor = FakeAgentRouter([{}, {}, {}], [])
+        telegram = FakeTelegram()
+        restarted = Prober(settings, monitor, telegram)
+        clock[0] += timedelta(seconds=30)
+        assert (await restarted.run_cycle()).notifications_sent == 0
+        clock[0] += timedelta(seconds=30)
+
+        other_chat = FakeTelegram()
+        other_chat.chat_id = "-100"
+        migrated = Prober(settings, monitor, other_chat)
+        assert (await migrated.run_cycle()).notifications_sent == 0
+        assert other_chat.messages == []
+
+        assert (await restarted.run_cycle()).notifications_sent == 1
+        assert telegram.messages == [
+            "Low balance alert\n\nYour balance is $9.50, below $10.00. Total used is $8.00."
+        ]
+        assert monitor.account_calls == 0
+        assert StateStore(settings.state_path).load().credit_alerts == {}
+
+    asyncio.run(run())
+
+
+def test_replacing_alert_during_delivery_keeps_the_new_threshold(state_directory):
+    settings = make_settings(state_directory / "state.json")
+    usage = account_usage(4_750_000, 4_000_000)
+    agent = FakeAgentRouter([{}], [], [usage, usage])
+
+    async def run():
+        sending = asyncio.Event()
+        finish = asyncio.Event()
+
+        class DelayedTelegram(FakeTelegram):
+            async def send(self, text, **kwargs):
+                sending.set()
+                await finish.wait()
+                await super().send(text, **kwargs)
+
+        prober = Prober(settings, agent, DelayedTelegram())
+        await prober.set_credit_alert("balance", Decimal("10"))
+        cycle = asyncio.create_task(prober.run_cycle())
+        try:
+            await asyncio.wait_for(sending.wait(), timeout=1)
+            await prober.set_credit_alert("balance", Decimal("6"))
+        finally:
+            finish.set()
+            await asyncio.wait_for(cycle, timeout=1)
+
+    asyncio.run(run())
+    alert = StateStore(settings.state_path).load().credit_alerts["balance"]
+    assert alert.threshold_quota == 3_000_000 and alert.pending_message is None
 
 
 def test_changing_interval_reschedules_an_overdue_probe(state_directory, monkeypatch):

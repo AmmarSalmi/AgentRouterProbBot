@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+from decimal import Decimal
 from typing import Any
 
 from .app import Prober
@@ -9,18 +11,25 @@ from .clients import ClientError, TransientClientError
 from .messages import (
     SCHEDULE_CHOICES,
     TELEGRAM_COMMANDS,
+    TELEGRAM_CREDIT_ALERT_MENU,
+    TELEGRAM_HELP,
     TELEGRAM_MENU,
     TELEGRAM_SCHEDULE_MENU,
     account_usage_message,
+    credit_alert_confirmation,
     format_duration,
     probing_schedule_message,
     status_message,
     telegram_message_parts,
 )
+from .state import CreditAlertKind
 from .telegram import _retry
 
 
 LOGGER = logging.getLogger(__name__)
+CREDIT_AMOUNT = re.compile(
+    r"(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]{1,2})?|\.[0-9]{1,2}"
+)
 
 
 class TelegramCommands:
@@ -32,6 +41,7 @@ class TelegramCommands:
         except ValueError:
             chat_id = 0
         self.owner_id = chat_id if chat_id > 0 else None
+        self._credit_alert_input: CreditAlertKind | None = None
 
     @property
     def enabled(self) -> bool:
@@ -45,7 +55,7 @@ class TelegramCommands:
             "Telegram command menu",
         )
 
-    def _message_command(self, update: dict[str, Any]) -> str | None:
+    def _message_text(self, update: dict[str, Any]) -> str | None:
         message = update.get("message")
         if self.owner_id is None or not isinstance(message, dict):
             return None
@@ -63,7 +73,9 @@ class TelegramCommands:
             or not text.strip()
         ):
             return None
-        text = text.strip()
+        return text.strip()
+
+    def _message_command(self, text: str) -> str | None:
         if text.startswith("/"):
             command, separator, username = text.split(maxsplit=1)[0].partition("@")
             if separator and (
@@ -80,6 +92,8 @@ class TelegramCommands:
                 "/probe": "probe",
                 "/probing_schedule": "schedule",
                 "/schedule": "schedule",
+                "/credit_alerts": "credit_alerts",
+                "/help": "help",
             }.get(command.lower())
         text = " ".join(text.lower().split())
         if text in SCHEDULE_CHOICES:
@@ -91,6 +105,10 @@ class TelegramCommands:
             "usage": "balance",
             "probe now": "probe",
             "probing schedule": "schedule",
+            "credit alerts": "credit_alerts",
+            "spending alert": "spending_alert",
+            "low balance alert": "balance_alert",
+            "help": "help",
             "back": "menu",
         }.get(text)
 
@@ -109,8 +127,38 @@ class TelegramCommands:
 
             await _retry(send_part, "Telegram command reply")
 
+    async def _save_credit_alert(self, kind: CreditAlertKind, text: str) -> None:
+        amount_text = text.removeprefix("$").strip()
+        try:
+            if CREDIT_AMOUNT.fullmatch(amount_text) is None:
+                raise ValueError("Enter a positive amount such as 2.50.")
+            usage, alert = await self.prober.set_credit_alert(
+                kind,
+                Decimal(amount_text.replace(",", "")),
+                dollar_sign=text.startswith("$"),
+            )
+        except (ClientError, ValueError) as exc:
+            error = str(exc)
+        except OSError:
+            LOGGER.exception("Could not save the credit alert")
+            error = "The credit alert could not be saved. Try again."
+        else:
+            self._credit_alert_input = None
+            await self._reply(credit_alert_confirmation(kind, usage, alert.threshold_quota))
+            return
+        await self._reply(error, reply_markup=TELEGRAM_CREDIT_ALERT_MENU)
+
     async def handle_update(self, update: dict[str, Any]) -> None:
-        command = self._message_command(update)
+        text = self._message_text(update)
+        if text is None:
+            return
+        command = self._message_command(text)
+        if command is None:
+            if self._credit_alert_input is not None and not text.startswith("/"):
+                await self._save_credit_alert(self._credit_alert_input, text)
+            return
+        self._credit_alert_input = None
+
         if command == "status":
             if not self.prober.has_model_status:
                 await self._reply("Checking every model listed on AgentRouter…")
@@ -148,10 +196,26 @@ class TelegramCommands:
                 await self._reply(
                     f"Automatic probes every {format_duration(self.prober.poll_seconds)}."
                 )
-        elif command == "menu":
+        elif command == "credit_alerts":
             await self._reply(
-                "Choose Status, Probe Now, Balance & Usage, or Probing Schedule below."
+                "Choose a credit alert. Each alert sends once.",
+                reply_markup=TELEGRAM_CREDIT_ALERT_MENU,
             )
+        elif command in {"spending_alert", "balance_alert"}:
+            if command == "spending_alert":
+                self._credit_alert_input = "spending"
+                prompt = "Enter how much more credit to spend before the alert."
+            else:
+                self._credit_alert_input = "balance"
+                prompt = "Enter the balance to alert below."
+            await self._reply(
+                f"{prompt} Use the units shown in Balance & Usage.",
+                reply_markup=TELEGRAM_CREDIT_ALERT_MENU,
+            )
+        elif command == "help":
+            await self._reply(TELEGRAM_HELP)
+        elif command == "menu":
+            await self._reply("Choose an action below.")
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:
         if stop_event.is_set():

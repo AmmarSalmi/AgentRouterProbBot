@@ -163,6 +163,63 @@ def test_usage_alias_reports_account_errors_without_stopping_commands(state_dire
     assert telegram.sent[-1][0] == "AgentRouter balance check failed: invalid account response"
 
 
+def test_credit_alert_menu_confirms_spending_and_low_balance_targets(state_directory):
+    settings, agent, telegram, commands = setup(state_directory)
+
+    async def run():
+        await commands.handle_update(message("/credit_alerts"))
+        assert telegram.sent[-1][1]["keyboard"][0] == [
+            {"text": "Spending Alert"}, {"text": "Low Balance Alert"}
+        ]
+        await commands.handle_update(message("Spending Alert"))
+        await commands.handle_update(message("2.50", user_id=99))
+        await commands.handle_update(message("0"))
+        assert telegram.sent[-1][0] == "Enter a positive amount."
+        assert agent.account_calls == 0
+        await commands.handle_update(message("$2.50"))
+        assert telegram.sent[-1][0] == (
+            "Spending alert set for $2.50 more.\n"
+            "You have used $5.00 so far.\n"
+            "You’ll be alerted at $7.50 in total usage."
+        )
+
+        await commands.handle_update(message("Credit Alerts"))
+        await commands.handle_update(message("Low Balance Alert"))
+        await commands.handle_update(message("10"))
+        assert telegram.sent[-1][0] == (
+            "Low-balance alert set for balances below $10.00.\n"
+            "Your balance is $12.50 and you have used $5.00 so far.\n"
+            "At your current balance, expect the alert at about $7.50 in total usage ($2.50 more)."
+        )
+
+    asyncio.run(run())
+    alerts = StateStore(settings.state_path).load().credit_alerts
+    assert alerts["spending"].threshold_quota == 3_750_000
+    assert alerts["balance"].threshold_quota == 5_000_000
+    assert agent.account_calls == 2 and agent.status_calls == 0
+
+
+def test_low_balance_projection_uses_whole_quota_units(state_directory):
+    class QuotaAgent(FakeAgent):
+        async def fetch_account_usage(self):
+            return AccountUsage(5000, 1000, 0, "", 500_000.0, False)
+
+    settings = make_settings(state_directory)
+    telegram = FakeTelegram()
+    commands = TelegramCommands(Prober(settings, QuotaAgent(), telegram))
+
+    async def run():
+        await commands.handle_update(message("Low Balance Alert"))
+        await commands.handle_update(message("$1.50"))
+        assert telegram.sent[-1][0] == "This account uses quota units. Enter a whole number."
+        assert not commands.prober.state.credit_alerts
+        await commands.handle_update(message("1,500"))
+
+    asyncio.run(run())
+    assert commands.prober.state.credit_alerts["balance"].threshold_quota == 1500
+    assert "4,501 quota in total usage (3,501 quota more)" in telegram.sent[-1][0]
+
+
 def test_removed_codex_controls_are_ignored(state_directory):
     _, agent, telegram, commands = setup(state_directory)
     updates = [

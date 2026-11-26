@@ -7,6 +7,7 @@ import pytest
 
 from agentrouter_prober import cli
 from agentrouter_prober.config import Settings
+from agentrouter_prober.messages import TELEGRAM_HELP
 from agentrouter_prober.state import StateStore, health_is_fresh
 from agentrouter_prober.telegram import CONNECTED_MESSAGE, TelegramRegistrationStore
 
@@ -326,6 +327,8 @@ def test_daemon_menu_handles_commands_queued_after_start(
         message(3, 42, "Probing Schedule"),
         message(4, 42, "Every 30 min"),
         message(5, 99, "/status"),
+        message(6, 42, "Help"),
+        message(7, 42, "/help@test_bot"),
     ]
 
     async def handler(request):
@@ -364,18 +367,20 @@ def test_daemon_menu_handles_commands_queued_after_start(
     assert "gpt-6-astra ✅" in texts
     assert any(text.startswith("Probing Schedule") and "15 minutes" in text for text in texts)
     assert "Automatic probes every 30 minutes." in texts
+    assert texts.count(TELEGRAM_HELP) == 2
     assert all(item["chat_id"] == "42" for item in sent)
     assert sent[0]["reply_markup"]["keyboard"] == [
         [{"text": "Status"}, {"text": "Probe Now"}],
         [{"text": "Balance & Usage"}, {"text": "Probing Schedule"}],
+        [{"text": "Credit Alerts"}, {"text": "Help"}],
     ]
     assert menus[0][0] == "setMyCommands"
     assert menus[0][1]["scope"] == {"type": "chat", "chat_id": 42}
     assert [item["command"] for item in menus[0][1]["commands"]] == [
-        "status", "balance", "probe_now", "probing_schedule"
+        "status", "balance", "probe_now", "probing_schedule", "credit_alerts", "help"
     ]
     assert menus[1] == ("setChatMenuButton", {"chat_id": 42, "menu_button": {"type": "commands"}})
-    assert offsets == [None, 2, None, 6]
+    assert offsets == [None, 2, None, 8]
     assert model_requests == ["/api/user/model-status", "/v1/responses"]
     assert StateStore(configured_env).load().poll_seconds_override == 1800
     assert TelegramRegistrationStore(configured_env).load().chat_id == 42

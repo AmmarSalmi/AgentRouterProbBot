@@ -104,26 +104,46 @@ Direct execution reads environment variables from the shell.
 
 ## Telegram commands
 
-The bot offers four keyboard buttons and matching commands.
+Tap **Help** (`/help`) for a quick guide in Telegram. The bot probes AgentRouter
+models automatically and sends alerts when availability changes.
 
-- **Status** (`/status`) shows each model name with ✅ for confirmed availability
-  or ❌ otherwise. Detailed metrics, APIs, latency, timestamps, and errors remain
-  tracked in saved state. If no results exist, it starts a cycle; if a cycle is
-  running, it waits for that cycle. Reading existing results adds no probes.
-- **Balance & Usage** (`/balance`, also `/usage`) reads the dashboard
-  account's current balance, total consumed quota, request count, and group. It
-  converts quota to dollars using the site's public `/api/status` settings and
-  adds no model probes.
-- **Probe Now** (`/probe_now`, also `/probe`) refreshes model-status and probes
-  every returned model immediately.
-- **Probing Schedule** (`/probing_schedule`, also `/schedule`) shows the current
-  interval and lets you choose 5, 15, or 30 minutes. Your choice reschedules the
-  next automatic probe and persists across restarts. Tap **Use default** to
-  restore the interval configured by `POLL_SECONDS`.
+- **Status** (`/status`) shows the latest model availability results. A ✅ marks
+  confirmed availability, and other results appear as ❌. Status waits for a
+  running cycle, reads saved results, or starts a cycle when there are none.
+- **Probe Now** (`/probe_now`) refreshes the model list and probes every listed
+  model immediately.
+- **Balance & Usage** (`/balance`) shows your balance, total usage, request count,
+  and account group. The bot uses AgentRouter’s public `/api/status` settings
+  to convert quota to dollars.
+- **Probing Schedule** (`/probing_schedule`) sets automatic probes to run every
+  5, 15, or 30 minutes or restores the default interval. Changes apply to the
+  next automatic probe and persist across restarts. The default comes from
+  `POLL_SECONDS`.
+- **Credit Alerts** (`/credit_alerts`) sets one-time alerts for additional
+  spending or a low balance.
+
+You can also use `/usage` for balance, `/probe` for Probe Now, and `/schedule`
+for Probing Schedule.
 
 Send `/start` to refresh the keyboard. The bot accepts commands from the
 registered user in a private chat. An explicitly configured group or channel
 can receive alerts. Command replies and alerts share Telegram rate limits.
+
+## Credit alerts
+
+Open **Credit Alerts**, choose a type, and enter a positive amount in the units
+shown by **Balance & Usage**. Use up to two decimal places for dollars or a whole
+number for quota units.
+
+- **Spending Alert** adds the amount to your total usage at setup. The bot
+  confirms your current total and the total that will trigger the alert.
+- **Low Balance Alert** fires when your live balance falls below the amount
+  you set. The bot uses your current balance to estimate the additional spend
+  and the total usage at that point. Top-ups change that estimate.
+
+The bot checks credit alerts during each full probe cycle. It saves one alert
+of each type across restarts. Setting another alert of the same type replaces
+the previous one. An alert clears after Telegram accepts it.
 
 ## Registration
 
@@ -180,7 +200,7 @@ corrupt registration produces an error.
 | `PROBE_REASONING_EFFORT` | `low` | `minimal`, `low`, `medium`, or `high` for Responses |
 | `PROBE_CONCURRENCY` | `2` | Maximum simultaneous model probes |
 | `REQUEST_TIMEOUT_SECONDS` | `90` | HTTP timeout |
-| `STATE_PATH` | `/data/state.json` | Saved probe results and interval choice. Registration uses the same directory. |
+| `STATE_PATH` | `/data/state.json` | Saved probe results, interval choice, and credit alerts. Registration uses the same directory. |
 | `HEALTH_MAX_AGE_SECONDS` | `3600` | Maximum age of a successful model-status read |
 | `AGENTROUTER_CLIENT_USER_AGENT` | `codex_cli_rs/0.171.0 (Windows 11; x86_64)` | Model client user agent |
 | `LOG_LEVEL` | `INFO` | Log level |
