@@ -15,7 +15,7 @@ from .messages import TELEGRAM_MENU
 
 
 LOGGER = logging.getLogger(__name__)
-CONNECTED_MESSAGE = "Connected. Availability alerts will be sent here."
+CONNECTED_MESSAGE = "Connected. Choose an action to get started."
 T = TypeVar("T")
 
 

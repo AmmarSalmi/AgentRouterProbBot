@@ -29,6 +29,10 @@ class AuthenticationError(ClientError):
     pass
 
 
+class CredentialRejected(AuthenticationError):
+    pass
+
+
 class TransientClientError(ClientError):
     def __init__(self, message: str, retry_after: int | None = None):
         super().__init__(message)
@@ -128,6 +132,8 @@ def _looks_like_auth_error(message: str) -> bool:
     lowered = message.lower()
     markers = (
         "access token",
+        "invalid token",
+        "invalid user",
         "unauthorized",
         "unauthenticated",
         "permission",
@@ -139,6 +145,11 @@ def _looks_like_auth_error(message: str) -> bool:
         "不匹配",
     )
     return any(marker in lowered for marker in markers)
+
+
+def _is_html_response(response: httpx.Response) -> bool:
+    content_type = response.headers.get("content-type", "").lower()
+    return "json" not in content_type and response.text.lstrip().startswith("<")
 
 
 def _response_text(payload: Any) -> str | None:
@@ -279,19 +290,18 @@ class AgentRouterClient:
             detail = str(exc).replace(token, "[redacted]")
             raise TransientClientError(f"{label} request failed: {detail}") from exc
 
-        if response.status_code in {401, 403}:
-            raise AuthenticationError(auth_error)
         if response.status_code == 429 or response.status_code >= 500:
             raise TransientClientError(f"{label} returned HTTP {response.status_code}")
-        if not response.is_success:
-            raise ProtocolError(
-                f"{label} returned unexpected HTTP {response.status_code}"
-            )
-        content_type = response.headers.get("content-type", "").lower()
-        if "json" not in content_type and response.text.lstrip().startswith("<"):
+        if _is_html_response(response):
             raise AuthenticationError(
                 f"AgentRouter returned browser verification instead of {label.lower()}; "
                 "check AgentRouter access from this host"
+            )
+        if response.status_code in {401, 403}:
+            raise CredentialRejected(auth_error)
+        if not response.is_success:
+            raise ProtocolError(
+                f"{label} returned unexpected HTTP {response.status_code}"
             )
         try:
             payload = response.json()
@@ -300,7 +310,7 @@ class AgentRouterClient:
         if not isinstance(payload, dict) or payload.get("success") is not True:
             message = _message(payload, f"{label} request was unsuccessful")
             if _looks_like_auth_error(message):
-                raise AuthenticationError(auth_error)
+                raise CredentialRejected(auth_error)
             if not show_message:
                 raise ProtocolError(f"{label} request was unsuccessful")
             raise ProtocolError(message.replace(token, "[redacted]"))
@@ -339,7 +349,34 @@ class AgentRouterClient:
             self._quota_display_cache = (float(DEFAULT_QUOTA_PER_UNIT), True)
         return self._quota_display_cache
 
-    async def fetch_account_usage(self) -> AccountUsage:
+    async def validate_model_key(self) -> None:
+        try:
+            response = await self._request(
+                "GET",
+                f"{self.settings.agentrouter_base_url}/v1/models",
+                headers={"Authorization": f"Bearer {self.settings.agentrouter_api_key}"},
+            )
+        except httpx.RequestError:
+            raise TransientClientError("AgentRouter model API key check failed") from None
+        if response.status_code == 429 or response.status_code >= 500:
+            raise TransientClientError(f"Model API key check returned HTTP {response.status_code}")
+        if _is_html_response(response):
+            raise ProtocolError("AgentRouter returned browser verification during the model API key check")
+        if response.status_code in {401, 402, 403}:
+            raise CredentialRejected("AgentRouter rejected the model API key")
+        if not response.is_success:
+            raise ProtocolError(f"Model API key check returned HTTP {response.status_code}")
+        try:
+            payload = response.json()
+        except ValueError:
+            raise ProtocolError("Model API key check returned invalid JSON") from None
+        if (
+            not isinstance(payload, dict) or payload.get("error") or payload.get("success") is False
+            or not isinstance(payload.get("data"), list)
+        ):
+            raise ProtocolError("Model API key check did not return a model list")
+
+    async def _account_usage(self) -> tuple[int, int, int, str]:
         payload = await self._dashboard_payload(
             "/api/user/self",
             referer=f"{self.settings.agentrouter_base_url}/console",
@@ -348,6 +385,8 @@ class AgentRouterClient:
         data = payload.get("data")
         if not isinstance(data, dict):
             raise ProtocolError("Account response did not contain account data")
+        if "id" in data and str(data["id"]) != str(self.settings.agentrouter_user_id):
+            raise CredentialRejected("AgentRouter returned a different dashboard account ID")
         quota = data.get("quota")
         used_quota = data.get("used_quota")
         request_count = data.get("request_count", 0)
@@ -361,6 +400,13 @@ class AgentRouterClient:
             raise ProtocolError("Account response did not contain valid usage data")
         raw_group = data.get("group")
         group = raw_group.strip() if isinstance(raw_group, str) else ""
+        return quota, used_quota, request_count, group
+
+    async def validate_dashboard_credentials(self) -> None:
+        await self._account_usage()
+
+    async def fetch_account_usage(self) -> AccountUsage:
+        quota, used_quota, request_count, group = await self._account_usage()
         quota_per_unit, display_in_currency = await self.quota_display_settings()
         return AccountUsage(
             quota=quota,
@@ -776,6 +822,13 @@ class TelegramClient:
         ):
             raise ProtocolError("Telegram returned invalid updates")
         return sorted(result, key=lambda update: update["update_id"])
+
+    async def delete_message(self, message_id: int) -> None:
+        if not self.chat_id:
+            raise ProtocolError("Telegram chat is not registered yet")
+        result = await self._request("deleteMessage", {"chat_id": self.chat_id, "message_id": message_id})
+        if result is not True:
+            raise ProtocolError("Telegram did not delete the message")
 
     async def send(
         self, text: str, *, reply_markup: dict[str, Any] | None = None

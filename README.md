@@ -15,67 +15,74 @@ not determine which models are probed.
 
 ## Credentials and local files
 
-You need:
+Set `TELEGRAM_BOT_TOKEN` to the bot token created through Telegram's
+`@BotFather`. You can leave the AgentRouter credentials blank for setup in
+Telegram or prefill them in the environment.
 
-1. `AGENTROUTER_API_KEY`: the normal `sk-...` key used for model requests.
-   `CODEX_GATEWAY_API_KEY` is also accepted as a fallback.
-2. `TELEGRAM_BOT_TOKEN`: a bot token created through Telegram's `@BotFather`.
-3. `AGENTROUTER_DASHBOARD_TOKEN` and `AGENTROUTER_USER_ID`: the raw system
-   access token generated in the AgentRouter dashboard and the matching
-   numeric account ID. The bot sends them as `Authorization: Bearer <token>`
-   and `New-Api-User: <account-id>` to read the balance and discover which
-   models to probe.
+- `AGENTROUTER_API_KEY` is the model key (`sk-...`) used for probes.
+  `CODEX_GATEWAY_API_KEY` is also accepted as a fallback.
+- `AGENTROUTER_USER_ID` is your numeric AgentRouter account ID.
+- `AGENTROUTER_DASHBOARD_TOKEN` is the raw system access token generated in the
+  dashboard for that account.
 
 Leave `TELEGRAM_CHAT_ID` blank or omit it. The first person who sends `/start`
 in the bot's private chat becomes its saved recipient. An explicitly configured
 chat ID skips registration.
 
+Choose any AgentRouter feature, such as **Status** or **Balance**, to start
+setup in the registered private chat. The bot asks for missing values one at a
+time and attempts to delete credential messages. It checks the model key with
+`/v1/models` and the dashboard token and account ID together with
+`/api/user/self`. If AgentRouter rejects a credential, the bot asks for that
+key or dashboard pair again. **Help** and the main menu work during setup.
+Probes, monitoring, and alerts start after all three values pass and are saved.
+
+The bot saves the verified set to `credentials/.env` beside `STATE_PATH`, at
+`/data/credentials/.env` in Docker. Saved credentials take precedence over
+environment values and are checked again on startup. An explicitly configured
+group or channel needs prefilled or saved credentials for alerts. Setup takes
+place in a private chat.
+
 ## Start with Docker
 
 The shared `compose.yaml` defaults to `.env` in the repository directory on
 Windows and Linux. For a new install, copy `.env.example` to `.env` and fill in
-the credentials above. If you already have `.env.vps`, rename it to `.env` or
+the Telegram bot token. If you already have `.env.vps`, rename it to `.env` or
 copy its settings into your existing `.env`.
 
 Prepare a writable `data/` directory, then run these commands from the
 repository directory. [VPS setup](VPS_SETUP.md#2-set-linux-permissions-and-credentials)
 
 ```sh
-docker compose build
-docker compose run --rm prober --test-telegram
-# When it says "Waiting for /start", open the bot and press Start.
-docker compose run --rm prober --once
-docker compose up -d
+docker compose up -d --build
 docker compose logs -f prober
 ```
 
-`--test-telegram` needs only the Telegram configuration and sends a test message
-without contacting AgentRouter. `--once` performs one full model cycle after
-Telegram registration; it still sends availability notifications. It exits
-non-zero when the status read fails or an authentication or protocol error
-occurs during a probe or notification.
-
-You can also start directly with `docker compose up -d --build`, then press
-Start. A queued `/start` works. Stop registration or active requests with Ctrl+C
-or `docker compose stop`; shutdown saves current state and pending alerts before
+Open the bot and press Start, then choose a feature to set up AgentRouter. A
+queued `/start` works. Stop registration or active requests with Ctrl+C or
+`docker compose stop`. Shutdown saves current state and pending alerts before
 closing the HTTP clients.
 
+`docker compose run --rm prober --test-telegram` sends a test message using
+the Telegram configuration alone. `docker compose run --rm prober --once`
+requires all three AgentRouter credentials and runs one model cycle after
+registration and validation. It exits non-zero if validation, the model status
+read, or an authentication or protocol check fails.
+
 Compose mounts `data/` at `/data` in the container. This directory preserves
-`state.json` and `telegram.json` across restarts and `docker compose down`.
+`state.json`, `telegram.json`, and `credentials/.env` across restarts and
+container recreation.
 
 ## Run directly on Windows
 
 ```powershell
 pip install -e ".[test]"
-$env:AGENTROUTER_API_KEY = "sk-replace-me"
-$env:AGENTROUTER_DASHBOARD_TOKEN = "replace-me"
-$env:AGENTROUTER_USER_ID = "12345"
 $env:TELEGRAM_BOT_TOKEN = "123456789:replace-me"
 $env:STATE_PATH = "$PWD\data\state.json"
 agentrouter-prober
 ```
 
-Direct execution reads environment variables from the shell.
+Direct execution uses shell environment variables and the same setup flow.
 
 ## Telegram commands
 
@@ -207,10 +214,11 @@ corrupt registration produces an error.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `AGENTROUTER_BASE_URL` | `https://agentrouter.org` | Status and model API host |
+| `AGENTROUTER_API_KEY` | empty | Model key for probing. Can be entered through Telegram setup. |
 | `TELEGRAM_CHAT_ID` | empty | Explicit destination; otherwise register via Start |
 | `TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | Telegram API host |
-| `AGENTROUTER_DASHBOARD_TOKEN` | required | Dashboard access token for balance, model discovery, API key metadata, and usage logs |
-| `AGENTROUTER_USER_ID` | required | Positive account ID paired with the dashboard token |
+| `AGENTROUTER_DASHBOARD_TOKEN` | empty | Dashboard access token for balance, model discovery, API key metadata, and usage logs |
+| `AGENTROUTER_USER_ID` | empty | Positive account ID paired with the dashboard token |
 | `POLL_SECONDS` | `900` | Default interval between automatic probe cycles |
 | `PROBE_MAX_OUTPUT_TOKENS` | `32` | Output-token limit for each greeting |
 | `PROBE_REASONING_EFFORT` | `low` | `minimal`, `low`, `medium`, or `high` for Responses |
@@ -225,9 +233,9 @@ corrupt registration produces an error.
 `NORMAL_POLL_SECONDS` and `CONFIRM_MAX_OUTPUT_TOKENS` remain fallbacks for
 `POLL_SECONDS` and `PROBE_MAX_OUTPUT_TOKENS`, respectively.
 
-Docker's health check runs `--healthcheck`, which checks the age of the saved
-successful model-status read. It needs no credentials and exposes no HTTP
-port. Health does not mean every model is available.
+Docker's `--healthcheck` permits the bot to wait for missing credentials.
+Once the three values are present, it checks the age of the last successful
+model-status read.
 
 ## Tests
 

@@ -2,7 +2,8 @@
 
 The VPS needs Docker Engine, Docker Compose V2, and a checkout of the bot.
 `compose.yaml` mounts the adjacent `data/` directory at `/data` in the
-container to store probe results and Telegram registration.
+container to store probe results, Telegram registration, and verified
+AgentRouter credentials.
 
 ## 1. Deploy the code
 
@@ -26,13 +27,13 @@ sudo chmod 600 .env
 sudo nano .env
 ```
 
-Fill in the AgentRouter model key, dashboard access token, matching numeric
-account ID, and Telegram bot token.
+Fill in the Telegram bot token. Leave the AgentRouter values blank to enter
+them in the bot's private chat, or prefill any you already have.
 
 ```dotenv
-AGENTROUTER_API_KEY=sk-replace-me
-AGENTROUTER_DASHBOARD_TOKEN=your-dashboard-access-token
-AGENTROUTER_USER_ID=your-numeric-account-id
+AGENTROUTER_API_KEY=
+AGENTROUTER_DASHBOARD_TOKEN=
+AGENTROUTER_USER_ID=
 TELEGRAM_BOT_TOKEN=your-telegram-bot-token
 TELEGRAM_CHAT_ID=
 ```
@@ -44,27 +45,19 @@ Leave `TELEGRAM_CHAT_ID` blank to register your private chat through `/start`.
 ```sh
 cd /opt/AgentRouterProbBot
 sudo docker compose config --quiet
-sudo docker compose build
-sudo docker compose run --rm prober --test-telegram
-```
-
-When the test waits for `/start`, open your bot's private chat and send
-`/start`. After Telegram confirms registration, run one live cycle and start
-the service.
-
-```sh
-sudo docker compose run --rm prober --once
-sudo docker compose up -d
+sudo docker compose up -d --build
 sudo docker compose logs --tail=80 prober
 sudo docker compose ps
 ```
 
-Use **Status**, **Balance**, and **Probe Now** in Telegram. Saved
-probe results and registration are in `data/state.json` and `data/telegram.json`.
+Send `/start` in the bot's private chat, then tap **Status** or **Balance** to
+provide any missing credentials. The bot starts probing after validation and
+saves the verified values in `/data/credentials/.env` inside the container.
 
 ## Refresh the dashboard token
 
-Update `AGENTROUTER_DASHBOARD_TOKEN` in `.env` and recreate the service.
+Update `AGENTROUTER_DASHBOARD_TOKEN` in `data/credentials/.env` and recreate the
+service. If setup has yet to save credentials, use the repository's `.env`.
 
 ```sh
 sudo docker compose up -d --force-recreate prober
@@ -75,7 +68,7 @@ sudo docker compose up -d --force-recreate prober
 | Message | Action |
 | --- | --- |
 | `bind source path does not exist` | Create `data` next to `compose.yaml`. |
-| `AgentRouter rejected dashboard authentication` | Check that `.env` contains the raw access token and numeric ID for the same account. |
+| `AgentRouter rejected the dashboard token and account ID pair` | Send the matching ID and raw dashboard token in the bot's setup prompts. |
 | Browser verification instead of model status | Check whether AgentRouter allows API requests from the VPS. |
 | Telegram webhook or polling conflict | Stop other update listeners using the same Telegram token. |
 | Permission error saving state | Check that `data` is writable by UID/GID `10001:10001`. |

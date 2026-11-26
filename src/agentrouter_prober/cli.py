@@ -12,15 +12,21 @@ from pathlib import Path
 from typing import Any
 
 from .app import Prober
-from .bot import run_bot
+from .bot import TelegramCommands
 from .clients import (
-    AgentRouterClient,
     AuthenticationError,
     ProtocolError,
     TelegramClient,
     TransientClientError,
 )
-from .config import ConfigurationError, Settings, TelegramSettings
+from .config import (
+    AGENTROUTER_CREDENTIALS,
+    ConfigurationError,
+    Settings,
+    TelegramSettings,
+    load_agentrouter_credentials,
+)
+from .setup import AgentRouterSetup
 from .state import health_is_fresh
 from .telegram import resolve_telegram_chat
 
@@ -134,14 +140,17 @@ async def _run(settings: Settings, once: bool) -> int:
     async def run() -> int:
         if not await resolve_telegram_chat(telegram, settings.state_path, stop_event):
             return 0
-        agentrouter = AgentRouterClient(settings)
-        try:
-            prober = Prober(settings, agentrouter, telegram)
-            if once:
-                result = await prober.run_cycle()
-                return 2 if result.fatal_error or not result.dashboard_ok else 0
-            await run_bot(prober, stop_event)
+        setup = AgentRouterSetup(settings)
+        if not once:
+            await TelegramCommands(telegram, setup=setup).run(stop_event)
             return 0
+        agentrouter = await setup.connect()
+        if agentrouter is None:
+            raise ConfigurationError(setup.problem or "AgentRouter credentials are required for --once")
+        try:
+            prober = Prober(agentrouter.settings, agentrouter, telegram)
+            result = await prober.run_cycle()
+            return 2 if result.fatal_error or not result.dashboard_ok else 0
         finally:
             await agentrouter.close()
 
@@ -158,11 +167,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.healthcheck:
             path = Path(os.getenv("STATE_PATH", "/data/state.json"))
+            if len(load_agentrouter_credentials(path)) < len(AGENTROUTER_CREDENTIALS):
+                return 0
             max_age = int(os.getenv("HEALTH_MAX_AGE_SECONDS", "3600"))
             return 0 if health_is_fresh(path, max_age) else 1
         if args.test_telegram:
             return asyncio.run(_test_telegram())
-        return asyncio.run(_run(Settings.from_env(), args.once))
+        return asyncio.run(_run(Settings.from_env(require_agentrouter=args.once), args.once))
     except ConfigurationError as exc:
         logging.getLogger(__name__).error("Configuration error: %s", exc)
         return 2

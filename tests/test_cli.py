@@ -1,11 +1,13 @@
 import asyncio
 import json
+import os
 import signal
+import stat
 
 import httpx
 import pytest
 
-from agentrouter_prober import cli
+from agentrouter_prober import cli, setup as credential_setup
 from agentrouter_prober.config import Settings
 from agentrouter_prober.messages import TELEGRAM_HELP
 from agentrouter_prober.state import StateStore, health_is_fresh
@@ -30,11 +32,25 @@ def configured_env(monkeypatch, state_directory):
     return state_directory / "state.json"
 
 
-def install_transport(monkeypatch, handler):
+def install_transport(monkeypatch, handler, *, mock_validation=True):
     real_client = httpx.AsyncClient
     clients = []
 
     def respond(request):
+        if mock_validation and request.url.host == "agentrouter.test":
+            if request.url.path == "/v1/models":
+                assert request.method == "GET"
+                assert request.headers["Authorization"] == "Bearer sk-test"
+                assert "New-Api-User" not in request.headers
+                return httpx.Response(200, json={"data": [{"id": "gpt-6-astra"}]})
+            if request.url.path == "/api/user/self":
+                assert request.headers["Authorization"] == "Bearer dashboard-token"
+                assert request.headers["New-Api-User"] == "60923"
+                return httpx.Response(200, json={
+                    "success": True, "data": {"id": 60923, "quota": 500_000, "used_quota": 0},
+                })
+            if request.url.path == "/api/status":
+                return httpx.Response(200, json={"data": {"quota_per_unit": 500_000}})
         if request.url.host == "agentrouter.test" and request.url.path == "/api/token/":
             assert request.headers["Authorization"] == "Bearer dashboard-token"
             assert request.headers["New-Api-User"] == "60923"
@@ -129,6 +145,150 @@ def test_cli_rejects_invalid_dashboard_credentials(
     assert cli.main(["--once"]) == 2
     assert f"{name} {reason}" in caplog.text
     assert not configured_env.exists()
+
+
+def test_bot_collects_missing_credentials_and_keeps_valid_values_when_a_check_fails(
+    configured_env, monkeypatch, caplog, completed_response
+):
+    for name in ("AGENTROUTER_API_KEY", "CODEX_GATEWAY_API_KEY", "AGENTROUTER_USER_ID", "AGENTROUTER_DASHBOARD_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    env_path = configured_env.parent / "credentials" / ".env"
+    sent, deleted, checks = [], [], []
+    telegram = telegram_response(sent)
+    probed = asyncio.Event()
+
+    def message(update_id, text, user_id=42):
+        return {"update_id": update_id, "message": {
+            "message_id": update_id, "text": text,
+            "chat": {"id": user_id, "type": "private"},
+            "from": {"id": user_id, "is_bot": False},
+        }}
+
+    updates = [
+        message(1, "/start"), message(2, "/help"), message(3, "/balance"),
+        message(4, "sk-other-user", user_id=99), message(5, "sk-test"),
+        message(6, "wrong-id"), message(7, "60923"), message(8, "dashboard-invalid"),
+        message(9, "/api_keys"), message(10, "60923"), message(11, "dashboard-token"),
+        message(12, "/balance"),
+    ]
+    acknowledged = 0
+
+    async def handler(request):
+        nonlocal acknowledged
+        path = request.url.path
+        if request.url.host == "telegram.test":
+            method = path.rsplit("/", 1)[-1]
+            if method == "getUpdates":
+                data = json.loads(request.content)
+                acknowledged = max(acknowledged, data.get("offset", 0))
+                remaining = [item for item in updates if item["update_id"] >= acknowledged]
+                if not remaining:
+                    await probed.wait()
+                    signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+                    await asyncio.Event().wait()
+                return httpx.Response(200, json={"ok": True, "result": remaining})
+            if method == "deleteMessage":
+                data = json.loads(request.content)
+                assert data["chat_id"] == "42"
+                deleted.append(data["message_id"])
+                return httpx.Response(200, json={"ok": True, "result": True})
+            return telegram(request)
+        if path == "/v1/models":
+            assert deleted[-1] in {8, 11}
+            assert request.headers["authorization"] == "Bearer sk-test"
+            checks.append(path)
+            return httpx.Response(200, json={"data": [{"id": "gpt-6-astra"}]})
+        if path == "/api/user/self":
+            assert request.headers["new-api-user"] == "60923"
+            if request.headers["authorization"] == "Bearer dashboard-invalid":
+                assert not env_path.exists() and not configured_env.exists()
+                return httpx.Response(401, json={"message": "dashboard-invalid"})
+            assert request.headers["authorization"] == "Bearer dashboard-token"
+            return httpx.Response(200, json={
+                "success": True, "data": {"id": 60923, "quota": 500_000, "used_quota": 0},
+            })
+        if path == "/api/status":
+            return httpx.Response(200, json={"data": {"quota_per_unit": 500_000}})
+        assert env_path.is_file(), "Probes must wait until all credentials are verified and saved"
+        if path == "/api/user/model-status":
+            return httpx.Response(200, json={"success": True, "data": {"models": [{
+                "name": "gpt-6-astra", "status": "operational", "current_tier": "ok",
+                "apis": ["responses"],
+            }]}})
+        assert path == "/v1/responses"
+        probed.set()
+        return httpx.Response(200, json=completed_response)
+
+    clients = install_transport(monkeypatch, handler, mock_validation=False)
+    assert cli.main(["--healthcheck"]) == 0
+    asyncio.run(asyncio.wait_for(cli._run(Settings.from_env(), False), timeout=2))
+    texts = "\n".join(item["text"] for item in sent)
+    assert TELEGRAM_HELP in texts
+    assert texts.count("Send your model API key") == 1
+    assert "AGENTROUTER_USER_ID must be an integer" in texts
+    assert "AgentRouter rejected the dashboard token and account ID pair" in texts
+    assert "credentials verified and saved" in texts
+    assert "💰 $1.00 available" in texts
+    assert deleted == [5, 6, 7, 8, 10, 11]
+    assert checks == ["/v1/models", "/v1/models"] and probed.is_set()
+    assert all(secret not in texts + caplog.text for secret in ("sk-test", "dashboard-token", "dashboard-invalid"))
+    if os.name == "posix":
+        assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+    monkeypatch.setenv("AGENTROUTER_DASHBOARD_TOKEN", "dashboard-invalid")
+    restored = Settings.from_env(require_agentrouter=True)
+    assert (restored.agentrouter_api_key, restored.agentrouter_user_id, restored.agentrouter_dashboard_token) == (
+        "sk-test", 60923, "dashboard-token",
+    )
+    assert asyncio.run(cli._run(restored, True)) == 0
+    assert checks == ["/v1/models"] * 3
+    assert all(client.is_closed for client in clients)
+
+
+def test_setup_retries_a_model_key_rejection_temporary_failure_and_unsaved_credentials(
+    configured_env, monkeypatch
+):
+    monkeypatch.setenv("AGENTROUTER_API_KEY", "sk-rejected")
+    model_responses = iter((401, 503, 200, 200))
+
+    def handler(request):
+        if request.url.path == "/v1/models":
+            status = next(model_responses)
+            assert request.headers["authorization"] == ("Bearer sk-rejected" if status == 401 else "Bearer sk-test")
+            return httpx.Response(status, json={"data": []})
+        assert request.url.path == "/api/user/self"
+        assert request.headers["authorization"] == "Bearer dashboard-token"
+        assert request.headers["New-Api-User"] == "60923"
+        return httpx.Response(200, json={
+            "success": True, "data": {"id": 60923, "quota": 500_000, "used_quota": 0},
+        })
+
+    clients = install_transport(monkeypatch, handler, mock_validation=False)
+    env_path = configured_env.parent / "credentials" / ".env"
+
+    def fail_save(*args):
+        raise OSError("Cannot save credentials")
+
+    async def run():
+        setup = credential_setup.AgentRouterSetup(Settings.from_env())
+        assert await setup.connect() is None
+        assert setup.next_field == "AGENTROUTER_API_KEY"
+        assert "rejected the model API key" in setup.problem
+        setup.submit("sk-test")
+        assert await setup.connect() is None
+        assert setup.next_field is None
+        assert "Could not verify the model API key" in setup.problem
+        with monkeypatch.context() as patch:
+            patch.setattr(credential_setup, "save_agentrouter_credentials", fail_save)
+            assert await setup.connect() is None
+            assert setup.next_field is None
+            assert "Could not save the verified credentials" in setup.problem
+            assert not env_path.exists()
+        client = await setup.connect()
+        assert client is not None and env_path.is_file()
+        await client.close()
+
+    asyncio.run(run())
+    assert all(client.is_closed for client in clients)
 
 
 @pytest.mark.parametrize("once", [True, False])

@@ -7,7 +7,8 @@ from decimal import Decimal
 from typing import Any
 
 from .app import Prober
-from .clients import ClientError, TransientClientError
+from .clients import ClientError, TelegramClient, TransientClientError
+from .config import ACCOUNT_ID, DASHBOARD_TOKEN, MODEL_KEY, ConfigurationError
 from .key_messages import (
     DAY_SECONDS,
     key_details,
@@ -33,6 +34,7 @@ from .messages import (
     telegram_keyboard,
     telegram_message_parts,
 )
+from .setup import AgentRouterSetup
 from .state import CreditAlertKind, KeyAlertKind, utc_now
 from .telegram import _retry
 
@@ -58,6 +60,13 @@ KEY_ACTIONS = {
 }
 WEEKLY_ACTIONS = {"weekly digest", "view weekly report", "enable weekly digest", "disable weekly digest"}
 
+SETUP_PROMPTS = {
+    MODEL_KEY: "Send your model API key (sk-…).",
+    ACCOUNT_ID: "Send your numeric AgentRouter account ID.",
+    DASHBOARD_TOKEN: "Send your raw AgentRouter dashboard access token.",
+}
+SETUP_MENU = telegram_keyboard(("Back",))
+
 
 KEY_MENU = telegram_keyboard(
     ("Last 24 Hours", "Last 7 Days"), ("Key Alerts", "Troubleshoot Key"), ("API Keys", "Back")
@@ -77,9 +86,20 @@ def _credit_amount(text: str) -> Decimal:
 
 
 class TelegramCommands:
-    def __init__(self, prober: Prober):
-        self.prober = prober
-        self.telegram = prober.telegram
+    def __init__(
+        self,
+        telegram: TelegramClient,
+        prober: Prober | None = None,
+        *,
+        setup: AgentRouterSetup | None = None,
+    ):
+        self.telegram = telegram
+        self._prober = prober
+        self._setup = setup
+        self._collecting_credentials = False
+        self._ready = asyncio.Event()
+        if prober is not None:
+            self._ready.set()
         try:
             chat_id = int(self.telegram.chat_id or "")
         except ValueError:
@@ -93,6 +113,11 @@ class TelegramCommands:
     @property
     def enabled(self) -> bool:
         return self.owner_id is not None
+
+    @property
+    def prober(self) -> Prober:
+        assert self._prober is not None
+        return self._prober
 
     async def prepare(self) -> None:
         if self.telegram.bot is None:
@@ -178,10 +203,56 @@ class TelegramCommands:
                     markup = reply_markup if index == len(parts) - 1 else None
                     await self.telegram.send(part, reply_markup=markup)
                 except TransientClientError as exc:
-                    self.prober.record_telegram_retry(exc)
+                    if self._prober is not None:
+                        self._prober.record_telegram_retry(exc)
                     raise
 
             await _retry(send_part, "Telegram command reply")
+
+    async def _activate(self) -> bool:
+        assert self._setup is not None
+        client = await self._setup.connect()
+        if client is None:
+            return False
+        try:
+            self._prober = Prober(client.settings, client, self.telegram)
+        except BaseException:
+            await client.close()
+            raise
+        self._ready.set()
+        return True
+
+    async def _advance_setup(self, note: str | None = None) -> None:
+        assert self._setup is not None
+        if self._setup.next_field is None:
+            self._collecting_credentials = False
+            await self._reply("⏳ Checking AgentRouter credentials…", reply_markup=SETUP_MENU)
+            if await self._activate():
+                await self._reply("✅ AgentRouter credentials verified and saved. Monitoring is active.")
+                return
+        field = self._setup.next_field
+        self._collecting_credentials = field is not None
+        details = note or self._setup.problem
+        prompt = SETUP_PROMPTS[field] if field is not None else "Choose an AgentRouter feature to retry."
+        lines = ["🔑 AgentRouter Setup", ""]
+        if details:
+            lines.extend((details, ""))
+        lines.append(prompt)
+        await self._reply("\n".join(lines), reply_markup=SETUP_MENU if field is not None else TELEGRAM_MENU)
+
+    async def _submit_credential(self, text: str, message_id: object) -> None:
+        assert self._setup is not None
+        if type(message_id) is int and message_id > 0:
+            try:
+                await self.telegram.delete_message(message_id)
+            except ClientError:
+                LOGGER.warning("Telegram could not delete a credential message")
+        try:
+            self._setup.submit(text)
+        except ConfigurationError as exc:
+            await self._advance_setup(str(exc))
+        else:
+            await self._advance_setup()
 
     async def _save_credit_alert(self, kind: CreditAlertKind, text: str) -> None:
         try:
@@ -333,6 +404,18 @@ class TelegramCommands:
             return
         command = self._message_command(text)
         selected = KEY_SELECTION.fullmatch(text)
+        if command in {"help", "menu"}:
+            self._credit_alert_input = None
+            self._key_alert_input = None
+            self._collecting_credentials = False
+            await self._reply(TELEGRAM_HELP if command == "help" else "🤖 AgentRouter")
+            return
+        if self._prober is None:
+            if command is not None or selected is not None:
+                await self._advance_setup()
+            elif self._collecting_credentials and not text.startswith("/"):
+                await self._submit_credential(text, update["message"].get("message_id"))
+            return
         if selected is not None:
             self._credit_alert_input = None
             self._key_alert_input = None
@@ -401,10 +484,6 @@ class TelegramCommands:
                 f"{prompt} Use the units shown in Balance.",
                 reply_markup=TELEGRAM_CREDIT_ALERT_MENU,
             )
-        elif command == "help":
-            await self._reply(TELEGRAM_HELP)
-        elif command == "menu":
-            await self._reply("🤖 AgentRouter")
         else:
             await self._handle_monitoring(command)
 
@@ -427,27 +506,42 @@ class TelegramCommands:
                 await asyncio.sleep(0)
 
 
-async def run_bot(prober: Prober, stop_event: asyncio.Event) -> None:
-    commands = TelegramCommands(prober)
-    if not commands.enabled:
-        LOGGER.info(
-            "Telegram commands require a private chat; continuing availability notifications"
-        )
-        await prober.run_forever(stop_event)
-        return
-    tasks = (
-        asyncio.create_task(prober.run_forever(stop_event)),
-        asyncio.create_task(commands.run_forever(stop_event)),
-    )
-    try:
-        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
-            await task
-    finally:
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for result in results:
-            if isinstance(result, Exception):
-                raise result
+    async def run(self, stop_event: asyncio.Event) -> None:
+        async def monitor() -> None:
+            await self._ready.wait()
+            await self.prober.run_forever(stop_event)
+
+        try:
+            if self._prober is None:
+                await self._activate()
+                if self._setup and self._setup.problem:
+                    LOGGER.warning("AgentRouter setup required. %s", self._setup.problem)
+
+            if not self.enabled:
+                if self._prober is not None:
+                    LOGGER.info("Telegram commands require a private chat; continuing availability notifications")
+                    await self.prober.run_forever(stop_event)
+                else:
+                    LOGGER.info("Set AgentRouter credentials in the environment or run setup in a private chat")
+                    await stop_event.wait()
+                return
+
+            tasks = (
+                asyncio.create_task(monitor()),
+                asyncio.create_task(self.run_forever(stop_event)),
+            )
+            try:
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    await task
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception):
+                        raise result
+        finally:
+            if self._prober is not None:
+                await self._prober.agentrouter.close()

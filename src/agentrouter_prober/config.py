@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from urllib.parse import urlparse
+
+
+MODEL_KEY = "AGENTROUTER_API_KEY"
+ACCOUNT_ID = "AGENTROUTER_USER_ID"
+DASHBOARD_TOKEN = "AGENTROUTER_DASHBOARD_TOKEN"
+AGENTROUTER_CREDENTIALS = (MODEL_KEY, ACCOUNT_ID, DASHBOARD_TOKEN)
 
 
 class ConfigurationError(ValueError):
@@ -29,6 +37,10 @@ def _positive_int(name: str, default: int | None = None, *fallback_names: str) -
         if default is None:
             raise ConfigurationError(f"{name} is required")
         raw = str(default)
+    return _parse_positive_int(name, raw)
+
+
+def _parse_positive_int(name: str, raw: str) -> int:
     try:
         value = int(raw)
     except ValueError as exc:
@@ -36,6 +48,73 @@ def _positive_int(name: str, default: int | None = None, *fallback_names: str) -
     if value <= 0:
         raise ConfigurationError(f"{name} must be greater than zero")
     return value
+
+
+def parse_agentrouter_credential(name: str, value: str) -> str:
+    value = value.strip()
+    if not value:
+        raise ConfigurationError(f"{name} is required")
+    if name == ACCOUNT_ID:
+        return str(_parse_positive_int(name, value))
+    if not value.isascii() or not value.isprintable() or any(char.isspace() for char in value):
+        raise ConfigurationError(f"{name} must be a single token without spaces")
+    return value
+
+
+def _agentrouter_env_path(state_path: Path) -> Path:
+    return state_path.parent / "credentials" / ".env"
+
+
+def load_agentrouter_credentials(state_path: Path, *, required: bool = False) -> dict[str, str]:
+    path = _agentrouter_env_path(state_path)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        lines = []
+    except (OSError, UnicodeError):
+        raise ConfigurationError(f"Cannot read saved AgentRouter credentials from {path}") from None
+
+    values = {name: os.getenv(name, "") for name in AGENTROUTER_CREDENTIALS}
+    if not values[MODEL_KEY].strip():
+        values[MODEL_KEY] = os.getenv("CODEX_GATEWAY_API_KEY", "")
+    for line in lines:
+        name, _, value = line.partition("=")
+        if name not in values or not value:
+            continue
+        if value.startswith('"'):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                continue
+        if isinstance(value, str):
+            values[name] = value
+
+    credentials = {}
+    for name, value in values.items():
+        try:
+            credentials[name] = parse_agentrouter_credential(name, value)
+        except ConfigurationError:
+            if required:
+                raise
+    return credentials
+
+
+def save_agentrouter_credentials(state_path: Path, credentials: dict[str, str]) -> None:
+    path = _agentrouter_env_path(state_path)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = None
+    try:
+        # NamedTemporaryFile creates the secret file with mode 0600 on POSIX.
+        with NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=".env.", delete=False
+        ) as file:
+            temporary = Path(file.name)
+            for name in AGENTROUTER_CREDENTIALS:
+                file.write(f"{name}={json.dumps(credentials[name])}\n")
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _url(name: str, default: str) -> str:
@@ -48,7 +127,7 @@ def _url(name: str, default: str) -> str:
 
 @dataclass(frozen=True)
 class TelegramSettings:
-    bot_token: str
+    bot_token: str = field(repr=False)
     chat_id: str | None = None
     api_base_url: str = "https://api.telegram.org"
 
@@ -64,7 +143,7 @@ class TelegramSettings:
 @dataclass(frozen=True)
 class Settings:
     agentrouter_base_url: str
-    agentrouter_api_key: str
+    agentrouter_api_key: str = field(repr=False)
     agentrouter_dashboard_token: str = field(repr=False)
     agentrouter_user_id: int
     telegram: TelegramSettings
@@ -79,7 +158,7 @@ class Settings:
     probe_key_low_balance_usd: Decimal = Decimal("1.00")
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls, *, require_agentrouter: bool = False) -> "Settings":
         reasoning_effort = os.getenv("PROBE_REASONING_EFFORT", "low").strip().lower()
         if reasoning_effort not in {"minimal", "low", "medium", "high"}:
             raise ConfigurationError(
@@ -94,15 +173,15 @@ class Settings:
         if not key_alert_threshold.is_finite() or key_alert_threshold <= 0:
             raise ConfigurationError(threshold_error)
 
+        state_path = Path(os.getenv("STATE_PATH", "/data/state.json"))
+        credentials = load_agentrouter_credentials(state_path, required=require_agentrouter)
         return cls(
             agentrouter_base_url=_url(
                 "AGENTROUTER_BASE_URL", "https://agentrouter.org"
             ),
-            agentrouter_api_key=_required_any(
-                "AGENTROUTER_API_KEY", "CODEX_GATEWAY_API_KEY"
-            ),
-            agentrouter_dashboard_token=_required_any("AGENTROUTER_DASHBOARD_TOKEN"),
-            agentrouter_user_id=_positive_int("AGENTROUTER_USER_ID"),
+            agentrouter_api_key=credentials.get(MODEL_KEY, ""),
+            agentrouter_dashboard_token=credentials.get(DASHBOARD_TOKEN, ""),
+            agentrouter_user_id=int(credentials.get(ACCOUNT_ID, "0")),
             telegram=TelegramSettings.from_env(),
             poll_seconds=_positive_int("POLL_SECONDS", 900, "NORMAL_POLL_SECONDS"),
             probe_max_output_tokens=_positive_int(
@@ -110,7 +189,7 @@ class Settings:
             ),
             probe_concurrency=_positive_int("PROBE_CONCURRENCY", 2),
             request_timeout_seconds=_positive_int("REQUEST_TIMEOUT_SECONDS", 90),
-            state_path=Path(os.getenv("STATE_PATH", "/data/state.json")),
+            state_path=state_path,
             health_max_age_seconds=_positive_int("HEALTH_MAX_AGE_SECONDS", 3600),
             client_user_agent=os.getenv(
                 "AGENTROUTER_CLIENT_USER_AGENT",

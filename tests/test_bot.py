@@ -107,7 +107,7 @@ def setup(directory):
     settings = make_settings(directory)
     agent, telegram = FakeAgent(), FakeTelegram()
     return settings, agent, telegram, TelegramCommands(
-        Prober(settings, agent, telegram)
+        telegram, Prober(settings, agent, telegram)
     )
 
 
@@ -166,7 +166,7 @@ def test_usage_alias_reports_account_errors_without_stopping_commands(state_dire
 
     settings = make_settings(state_directory)
     agent, telegram = FailingAgent(), FakeTelegram()
-    commands = TelegramCommands(Prober(settings, agent, telegram))
+    commands = TelegramCommands(telegram, Prober(settings, agent, telegram))
     asyncio.run(commands.handle_update(message("/usage")))
     assert agent.account_calls == 1
     assert telegram.sent[-1][0] == "AgentRouter balance check failed: invalid account response"
@@ -231,7 +231,7 @@ def test_api_key_menu_history_alerts_and_troubleshooting_are_private(state_direc
     prober = Prober(settings, agent, telegram)
     prober.state.active_models = ["allowed", "other"]
     prober.state.model("allowed").availability = "available"
-    commands = TelegramCommands(prober)
+    commands = TelegramCommands(telegram, prober)
 
     async def run():
         await commands.handle_update(message("/api_keys", user_id=70))
@@ -344,7 +344,7 @@ def test_low_balance_projection_uses_whole_quota_units(state_directory):
 
     settings = make_settings(state_directory)
     telegram = FakeTelegram()
-    commands = TelegramCommands(Prober(settings, QuotaAgent(), telegram))
+    commands = TelegramCommands(telegram, Prober(settings, QuotaAgent(), telegram))
 
     async def run():
         await commands.handle_update(message("Low Balance Alert"))
@@ -421,7 +421,7 @@ def test_schedule_choice_survives_restart_and_can_be_reset(state_directory):
 
     agent, telegram = FakeAgent(), FakeTelegram()
     restarted_settings = replace(settings, poll_seconds=1200)
-    restarted = TelegramCommands(Prober(restarted_settings, agent, telegram))
+    restarted = TelegramCommands(telegram, Prober(restarted_settings, agent, telegram))
 
     async def reset():
         await restarted.handle_update(message("/schedule"))

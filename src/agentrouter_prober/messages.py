@@ -72,6 +72,7 @@ TELEGRAM_HELP = (
     "📊 Weekly Digest (/weekly_digest) · Compare the last two completed UTC weeks. "
     "See top keys and models by spend or turn on auto-send.\n"
     "⏱️ Schedule (/probing_schedule) · Probe every 5, 15, or 30 minutes, or use the default\n\n"
+    "Choose any AgentRouter feature to set up missing or rejected credentials.\n"
     "Automatic alerts cover model availability changes and low probing-key quota.\n"
     "Send /start to refresh the keyboard."
 )
