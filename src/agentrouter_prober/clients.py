@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from dataclasses import dataclass
+from collections import Counter
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from decimal import Decimal
 from enum import Enum
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -79,6 +81,37 @@ class AccountUsage:
     group: str
     quota_per_unit: float
     display_in_currency: bool
+
+
+QuotaDisplay = tuple[float, bool]
+
+
+@dataclass(frozen=True)
+class ApiKey:
+    id: int
+    name: str
+    status: int
+    remaining_quota: int | None
+    used_quota: int
+    expires_at: int = 0
+    last_used_at: int = 0
+    group: str = ""
+    model_limits: tuple[str, ...] | None = None
+    allowed_ips: tuple[str, ...] = ()
+    is_probe_key: bool = False
+
+
+@dataclass(frozen=True)
+class UsageTotals:
+    spent: int
+    requests: int
+    by_key: Counter[int] = field(default_factory=Counter)
+    by_model: Counter[str] = field(default_factory=Counter)
+    key_names: dict[int, str] = field(default_factory=dict)
+
+
+def _display_label(value: object) -> str:
+    return " ".join(value.split())[:100] if isinstance(value, str) else ""
 
 
 def _message(payload: Any, fallback: str = "") -> str:
@@ -202,7 +235,7 @@ class AgentRouterClient:
                 "originator": "codex_cli_rs",
             },
         )
-        self._quota_display_cache: tuple[float, bool] | None = None
+        self._quota_display_cache: QuotaDisplay | None = None
 
     async def close(self) -> None:
         if self._owns_client:
@@ -222,7 +255,7 @@ class AgentRouterClient:
         return await self.http.send(request, follow_redirects=False)
 
     async def _dashboard_payload(
-        self, path: str, *, referer: str, label: str
+        self, path: str, *, referer: str, label: str, show_message: bool = True
     ) -> dict[str, Any]:
         token = self.settings.agentrouter_dashboard_token
         auth_error = (
@@ -268,10 +301,12 @@ class AgentRouterClient:
             message = _message(payload, f"{label} request was unsuccessful")
             if _looks_like_auth_error(message):
                 raise AuthenticationError(auth_error)
+            if not show_message:
+                raise ProtocolError(f"{label} request was unsuccessful")
             raise ProtocolError(message.replace(token, "[redacted]"))
         return payload
 
-    async def _quota_display_settings(self) -> tuple[float, bool]:
+    async def quota_display_settings(self) -> QuotaDisplay:
         if self._quota_display_cache is not None:
             return self._quota_display_cache
         try:
@@ -326,7 +361,7 @@ class AgentRouterClient:
             raise ProtocolError("Account response did not contain valid usage data")
         raw_group = data.get("group")
         group = raw_group.strip() if isinstance(raw_group, str) else ""
-        quota_per_unit, display_in_currency = await self._quota_display_settings()
+        quota_per_unit, display_in_currency = await self.quota_display_settings()
         return AccountUsage(
             quota=quota,
             used_quota=used_quota,
@@ -336,33 +371,22 @@ class AgentRouterClient:
             display_in_currency=display_in_currency,
         )
 
-    async def fetch_probe_key_balance(self) -> Decimal | None:
-        """Return the configured model key's remaining USD quota, or None if unlimited."""
-        key = self.settings.agentrouter_api_key.removeprefix("sk-")
+    async def _dashboard_items(
+        self, path: str, *, label: str, console_page: str, **params: int
+    ) -> AsyncIterator[dict[str, Any]]:
         page = 1
         while True:
+            query = urlencode({**params, "p": page})
             payload = await self._dashboard_payload(
-                f"/api/token/?p={page}",
-                referer=f"{self.settings.agentrouter_base_url}/console/token",
-                label="API key list",
+                f"{path}?{query}",
+                referer=f"{self.settings.agentrouter_base_url}/console/{console_page}",
+                label=label,
+                show_message=False,
             )
             data = payload.get("data")
-            if not isinstance(data, dict) or not isinstance(data.get("items"), list):
-                raise ProtocolError("API key list did not contain key records")
-
-            for record in data["items"]:
-                stored_key = record.get("key") if isinstance(record, dict) else None
-                if not isinstance(stored_key, str) or stored_key.removeprefix("sk-") != key:
-                    continue
-                unlimited = record.get("unlimited_quota")
-                if unlimited is True:
-                    return None
-                remaining = record.get("remain_quota")
-                if unlimited is not False or type(remaining) is not int:
-                    raise ProtocolError("API key list did not contain valid probe key quota")
-                quota_per_unit, _ = await self._quota_display_settings()
-                return Decimal(remaining) / Decimal(str(quota_per_unit))
-
+            if not isinstance(data, dict):
+                raise ProtocolError(f"{label} did not contain records")
+            items = data.get("items")
             page_size = data.get("page_size")
             total = data.get("total")
             if (
@@ -372,10 +396,91 @@ class AgentRouterClient:
                 or type(total) is not int
                 or total < 0
             ):
-                raise ProtocolError("API key list did not contain valid pagination")
+                raise ProtocolError(f"{label} did not contain valid pagination")
+            if items is None and total == 0:
+                return
+            expected = min(page_size, max(0, total - (page - 1) * page_size))
+            if not isinstance(items, list) or len(items) < expected:
+                raise ProtocolError(f"{label} did not contain records for this page")
+            for item in items:
+                if not isinstance(item, dict):
+                    raise ProtocolError(f"{label} returned an invalid record")
+                yield item
             if page * page_size >= total:
-                raise ProtocolError("Configured probe key was not found in the dashboard key list")
+                return
             page += 1
+
+    async def fetch_api_keys(self) -> dict[int, ApiKey]:
+        keys = {}
+        probe_key = self.settings.agentrouter_api_key.removeprefix("sk-")
+        async for item in self._dashboard_items(
+            "/api/token/", label="API key list", console_page="token"
+        ):
+            key_id = item.get("id")
+            status = item.get("status")
+            unlimited = item.get("unlimited_quota")
+            remaining = item.get("remain_quota")
+            used = item.get("used_quota")
+            if (
+                type(key_id) is not int or key_id <= 0 or type(status) is not int
+                or type(unlimited) is not bool or (not unlimited and type(remaining) is not int)
+                or type(used) is not int or used < 0
+            ):
+                raise ProtocolError("API key list returned invalid key quota or status")
+            key_value = item.get("key")
+            name = _display_label(item.get("name")) or f"Key #{key_id}"
+            expires_at = item.get("expired_time")
+            last_used_at = item.get("accessed_time")
+            model_limits = item.get("model_limits")
+            allowed_ips = item.get("allow_ips")
+            allowed_models = None
+            if item.get("model_limits_enabled") is True:
+                model_names = model_limits.split(",") if isinstance(model_limits, str) else []
+                allowed_models = tuple(name.strip() for name in model_names if name.strip())
+            keys[key_id] = ApiKey(
+                id=key_id,
+                name=name,
+                status=status,
+                remaining_quota=None if unlimited else remaining,
+                used_quota=used,
+                expires_at=expires_at if type(expires_at) is int else 0,
+                last_used_at=last_used_at if type(last_used_at) is int else 0,
+                group=_display_label(item.get("group")),
+                model_limits=allowed_models,
+                allowed_ips=tuple(allowed_ips.replace(",", " ").split())
+                if isinstance(allowed_ips, str) else (),
+                is_probe_key=isinstance(key_value, str) and key_value.removeprefix("sk-") == probe_key,
+            )
+        return keys
+
+    async def fetch_usage_totals(
+        self, start: int, end: int, *, key_id: int | None = None
+    ) -> UsageTotals:
+        """Summarize consumption in [start, end), optionally for one numeric key ID."""
+        by_key: Counter[int] = Counter()
+        by_model: Counter[str] = Counter()
+        key_names: dict[int, str] = {}
+        requests = 0
+        async for item in self._dashboard_items(
+            "/api/log/self", label="Usage log", console_page="log",
+            type=2, start_timestamp=start, end_timestamp=end - 1, page_size=100,
+        ):
+            created_at = item.get("created_at")
+            quota = item.get("quota")
+            log_key_id = item.get("token_id", 0)
+            if type(created_at) is not int or type(quota) is not int or type(log_key_id) is not int:
+                raise ProtocolError("Usage log returned an invalid consumption record")
+            if not start <= created_at < end or (key_id is not None and key_id != log_key_id):
+                continue
+            requests += 1
+            model = item.get("model_name")
+            if not isinstance(model, str) or not model:
+                model = "Unknown model"
+            by_key[log_key_id] += quota
+            by_model[model] += quota
+            if name := _display_label(item.get("token_name")):
+                key_names.setdefault(log_key_id, name)
+        return UsageTotals(sum(by_key.values()), requests, by_key, by_model, key_names)
 
     async def fetch_model_status(self) -> dict[str, ModelObservation]:
         payload = await self._dashboard_payload(

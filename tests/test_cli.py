@@ -40,7 +40,10 @@ def install_transport(monkeypatch, handler):
             assert request.headers["New-Api-User"] == "60923"
             return httpx.Response(200, json={
                 "success": True,
-                "data": {"items": [{"key": "test", "unlimited_quota": True}]},
+                "data": {"page": 1, "page_size": 20, "total": 1, "items": [{
+                    "id": 1, "name": "Prober", "key": "test", "status": 1,
+                    "unlimited_quota": True, "used_quota": 0,
+                }]},
             })
         return handler(request)
 
@@ -382,12 +385,14 @@ def test_daemon_menu_handles_commands_queued_after_start(
     assert sent[0]["reply_markup"]["keyboard"] == [
         [{"text": "Status"}, {"text": "Probe Now"}],
         [{"text": "Balance & Usage"}, {"text": "Probing Schedule"}],
-        [{"text": "Credit Alerts"}, {"text": "Help"}],
+        [{"text": "Credit Alerts"}, {"text": "API Keys"}],
+        [{"text": "Weekly Digest"}, {"text": "Help"}],
     ]
     assert menus[0][0] == "setMyCommands"
     assert menus[0][1]["scope"] == {"type": "chat", "chat_id": 42}
     assert [item["command"] for item in menus[0][1]["commands"]] == [
-        "status", "balance", "probe_now", "probing_schedule", "credit_alerts", "help"
+        "status", "balance", "probe_now", "probing_schedule", "credit_alerts", "api_keys",
+        "weekly_digest", "help",
     ]
     assert menus[1] == ("setChatMenuButton", {"chat_id": 42, "menu_button": {"type": "commands"}})
     assert offsets == [None, 2, None, 8]

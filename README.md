@@ -96,7 +96,12 @@ probing key is low on quota.
   next automatic probe and persist across restarts. The default comes from
   `POLL_SECONDS`.
 - **Credit Alerts** (`/credit_alerts`) sets one-time alerts for additional
-  spending or a low balance.
+  account spending or a low wallet balance.
+- **API Keys** (`/api_keys`) lists each key’s remaining quota, total spent, and
+  status. Select a key for 24-hour and 7-day usage reports, per-key alerts, and
+  troubleshooting.
+- **Weekly Digest** (`/weekly_digest`) compares the last two completed UTC
+  weeks. View a report on demand or enable automatic delivery.
 
 You can also use `/usage` for balance, `/probe` for Probe Now, and `/schedule`
 for Probing Schedule.
@@ -127,6 +132,33 @@ when a limited key falls below $1.00 by default. Set `PROBE_KEY_LOW_BALANCE_USD`
 to change the threshold. The warning fires once per low-quota period and
 rearms when the quota recovers to the threshold. Unlimited keys have no
 per-key balance to monitor.
+
+## API key monitoring
+
+Open **API Keys** to see the shared account balance alongside the quota and
+lifetime spending for each key. A key’s quota is its individual spending cap
+on the shared account balance. Keys without a cap show **Unlimited**. The bot
+reads these fields with the dashboard token and uses numeric key IDs to keep
+keys with duplicate names or renamed keys distinct. It shows key metadata in
+the registered private chat.
+
+- **Last 24 Hours** and **Last 7 Days** show spend, logged request counts, and
+  the top models by spend for that key. The reports use AgentRouter’s available
+  consumption logs.
+- **Key Alerts** lets you set a one-time alert for additional spending, quota
+  below a threshold, or a set number of days before expiry. Setting the same
+  alert again replaces it. **Clear Key Alerts** clears the selected key’s
+  custom alerts. The automatic probing-key warning runs independently.
+- **Troubleshoot Key** shows whether the key is disabled, expired, or out of
+  quota, along with its group and model and IP restrictions. It also displays
+  the latest model results from the bot’s probing key.
+
+**Weekly Digest** reports total logged spend, the change versus the prior
+week, and the top five keys and models by spend. Automatic delivery is off by
+default. Enable it from the menu to get one digest after each completed UTC
+week (Monday through Sunday). The bot checks delivery on its regular probe
+schedule. Alerts and the digest subscription persist across restarts and use
+the existing Telegram retry handling.
 
 ## Registration
 
@@ -176,7 +208,7 @@ corrupt registration produces an error.
 | `AGENTROUTER_BASE_URL` | `https://agentrouter.org` | Status and model API host |
 | `TELEGRAM_CHAT_ID` | empty | Explicit destination; otherwise register via Start |
 | `TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | Telegram API host |
-| `AGENTROUTER_DASHBOARD_TOKEN` | required | Dashboard access token for balance and model discovery |
+| `AGENTROUTER_DASHBOARD_TOKEN` | required | Dashboard access token for balance, model discovery, API key metadata, and usage logs |
 | `AGENTROUTER_USER_ID` | required | Positive account ID paired with the dashboard token |
 | `POLL_SECONDS` | `900` | Default interval between automatic probe cycles |
 | `PROBE_MAX_OUTPUT_TOKENS` | `32` | Output-token limit for each greeting |
@@ -184,7 +216,7 @@ corrupt registration produces an error.
 | `PROBE_CONCURRENCY` | `2` | Maximum simultaneous model probes |
 | `PROBE_KEY_LOW_BALANCE_USD` | `1.00` | Warn when the probing key's remaining quota falls below this USD amount |
 | `REQUEST_TIMEOUT_SECONDS` | `90` | HTTP timeout |
-| `STATE_PATH` | `/data/state.json` | Saved probe results, interval choice, and credit alerts. Registration uses the same directory. |
+| `STATE_PATH` | `/data/state.json` | Saved probe results, interval, alerts, and weekly digest subscription. Registration uses the same directory. |
 | `HEALTH_MAX_AGE_SECONDS` | `3600` | Maximum age of a successful model-status read |
 | `AGENTROUTER_CLIENT_USER_AGENT` | `codex_cli_rs/0.171.0 (Windows 11; x86_64)` | Model client user agent |
 | `LOG_LEVEL` | `INFO` | Log level |

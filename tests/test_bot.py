@@ -1,4 +1,5 @@
 import asyncio
+from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
@@ -6,13 +7,16 @@ from agentrouter_prober.app import Prober
 from agentrouter_prober.bot import TelegramCommands
 from agentrouter_prober.clients import (
     AccountUsage,
+    ApiKey,
     ModelObservation,
     ModelProbe,
     ProbeOutcome,
     ProtocolError,
     TelegramBot,
+    UsageTotals,
 )
 from agentrouter_prober.config import Settings, TelegramSettings
+from agentrouter_prober.key_messages import DAY_SECONDS
 from agentrouter_prober.state import StateStore
 
 
@@ -70,8 +74,11 @@ class FakeAgent:
         self.account_calls += 1
         return AccountUsage(6250000, 2500000, 321, "vip", 500000.0, True)
 
-    async def fetch_probe_key_balance(self):
-        return None
+    async def fetch_api_keys(self):
+        return {1: ApiKey(1, "Prober", 1, None, 0, is_probe_key=True)}
+
+    async def quota_display_settings(self):
+        return 500_000.0, True
 
     async def probe_model(self, observation):
         self.probed.append(observation.name)
@@ -200,6 +207,84 @@ def test_credit_alert_menu_confirms_spending_and_low_balance_targets(state_direc
     assert alerts["spending"].threshold_quota == 3_750_000
     assert alerts["balance"].threshold_quota == 5_000_000
     assert agent.account_calls == 2 and agent.status_calls == 0
+
+
+def test_api_key_menu_history_alerts_and_troubleshooting_are_private(state_directory):
+    settings = make_settings(state_directory)
+
+    class KeyAgent(FakeAgent):
+        async def fetch_api_keys(self):
+            return {
+                4: ApiKey(4, "Coding", 4, 0, 2_500_000, model_limits=("allowed",), allowed_ips=("203.0.113.10",)),
+                9: ApiKey(9, "Coding", 1, None, 8_000_000),
+            }
+
+        async def fetch_usage_totals(self, start, end, *, key_id=None):
+            assert key_id == 4
+            self.periods.append(end - start)
+            return UsageTotals(1_250_000, 3, by_model=Counter({"allowed": 1_250_000}))
+
+    agent = KeyAgent()
+    agent.periods = []
+    telegram = FakeTelegram()
+    prober = Prober(settings, agent, telegram)
+    prober.state.active_models = ["allowed", "other"]
+    prober.state.model("allowed").availability = "available"
+    commands = TelegramCommands(prober)
+
+    async def run():
+        await commands.handle_update(message("/api_keys", user_id=70))
+        await commands.handle_update(message("/api_keys", chat_type="group"))
+        assert not telegram.sent
+        await commands.handle_update(message("/api_keys"))
+        text, keyboard = telegram.sent[-1]
+        assert "Shared account balance: $12.50" in text
+        assert "Coding (#4) · Out of quota" in text and "Coding (#9) · Active" in text
+        await commands.handle_update(message(keyboard["keyboard"][0][0]["text"]))
+        assert "Last use:" in telegram.sent[-1][0] and "Expires:" in telegram.sent[-1][0]
+        for label in ("Last 24 Hours", "Last 7 Days"):
+            await commands.handle_update(message(label))
+            assert "Logged requests: 3" in telegram.sent[-1][0]
+            assert "allowed · $2.50" in telegram.sent[-1][0]
+        await commands.handle_update(message("Troubleshoot Key"))
+        assert "Allowed IPs: 203.0.113.10" in telegram.sent[-1][0]
+        assert "allowed · Available" in telegram.sent[-1][0]
+        assert "other · Unknown · Restricted for this key" in telegram.sent[-1][0]
+        await commands.handle_update(message("Key Alerts"))
+        await commands.handle_update(message("Key Spending Alert"))
+        await commands.handle_update(message("$2.50"))
+        assert "when it reaches $7.50" in telegram.sent[-1][0]
+        await commands.handle_update(message("Key Low-Quota Alert"))
+        await commands.handle_update(message("1"))
+        assert "already due" in telegram.sent[-1][0]
+
+    asyncio.run(run())
+    assert agent.periods == [DAY_SECONDS, 7 * DAY_SECONDS]
+    assert not agent.probed
+    saved = StateStore(settings.state_path).load().key_monitoring
+    assert set(saved.key_alerts) == {(4, "spending"), (4, "balance")}
+
+
+def test_weekly_digest_menu_views_report_and_persists_subscription(state_directory):
+    settings, _, telegram, commands = setup(state_directory)
+
+    async def totals(start, end):
+        return UsageTotals(100_000, 1)
+
+    commands.prober.agentrouter.fetch_usage_totals = totals
+
+    async def run():
+        await commands.handle_update(message("/weekly_digest"))
+        assert "Automatic delivery is off" in telegram.sent[-1][0]
+        await commands.handle_update(message("View Weekly Report"))
+        assert "Spent: $0.20 · Prior week: $0.20" in telegram.sent[-1][0]
+        await commands.handle_update(message("Enable Weekly Digest"))
+        assert "Automatic delivery is on" in telegram.sent[-1][0]
+        assert StateStore(settings.state_path).load().key_monitoring.weekly_digest is not None
+        await commands.handle_update(message("Disable Weekly Digest"))
+        assert StateStore(settings.state_path).load().key_monitoring.weekly_digest is None
+
+    asyncio.run(run())
 
 
 def test_low_balance_projection_uses_whole_quota_units(state_directory):

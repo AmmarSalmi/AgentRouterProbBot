@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from .clients import AccountUsage
+from .clients import AccountUsage, QuotaDisplay
 from .config import Settings
 from .state import CreditAlertKind, ModelRecord, PersistentState
 
@@ -13,13 +13,16 @@ TELEGRAM_COMMANDS = [
     {"command": "probe_now", "description": "Probe every listed model now"},
     {"command": "probing_schedule", "description": "View or change the probing interval"},
     {"command": "credit_alerts", "description": "Set spending and balance alerts"},
+    {"command": "api_keys", "description": "Monitor and troubleshoot API keys"},
+    {"command": "weekly_digest", "description": "View or subscribe to the weekly spending digest"},
     {"command": "help", "description": "Show a quick guide to the bot"},
 ]
 TELEGRAM_MENU = {
     "keyboard": [
         [{"text": "Status"}, {"text": "Probe Now"}],
         [{"text": "Balance & Usage"}, {"text": "Probing Schedule"}],
-        [{"text": "Credit Alerts"}, {"text": "Help"}],
+        [{"text": "Credit Alerts"}, {"text": "API Keys"}],
+        [{"text": "Weekly Digest"}, {"text": "Help"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -32,7 +35,11 @@ TELEGRAM_HELP = (
     "• Balance & Usage (/balance) shows your balance, total usage, request count, and account group.\n"
     "• Probing Schedule (/probing_schedule) sets automatic probes to run every 5, 15, "
     "or 30 minutes or restores the default interval.\n"
-    "• Credit Alerts (/credit_alerts) sets one-time alerts for additional spending or a low balance.\n\n"
+    "• Credit Alerts (/credit_alerts) sets one-time alerts for additional account spending or a low wallet balance.\n"
+    "• API Keys (/api_keys) shows quota left, total spent, and status for each key. Pick a key for "
+    "24-hour and 7-day usage, low-quota and spending alerts, expiry reminders, and troubleshooting.\n"
+    "• Weekly Digest (/weekly_digest) compares the last two completed UTC weeks and shows the "
+    "top keys and models by spending. Enable automatic delivery from that menu.\n\n"
     "Send /start to refresh the keyboard."
 )
 SCHEDULE_CHOICES: dict[str, int | None] = {
@@ -92,8 +99,13 @@ def probing_schedule_message(poll_seconds: int, probe_concurrency: int) -> str:
 
 
 def format_account_amount(usage: AccountUsage, quota: int) -> str:
-    if usage.display_in_currency and usage.quota_per_unit > 0:
-        amount = Decimal(quota) / Decimal(str(usage.quota_per_unit))
+    return format_quota_amount(quota, (usage.quota_per_unit, usage.display_in_currency))
+
+
+def format_quota_amount(quota: int, display: QuotaDisplay) -> str:
+    quota_per_unit, display_in_currency = display
+    if display_in_currency and quota_per_unit > 0:
+        amount = Decimal(quota) / Decimal(str(quota_per_unit))
         return f"${amount:,.2f}"
     return f"{quota:,} quota"
 

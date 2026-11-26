@@ -1,4 +1,6 @@
 import asyncio
+from collections import Counter
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -7,12 +9,15 @@ from agentrouter_prober import app as prober_app
 from agentrouter_prober.app import Prober
 from agentrouter_prober.clients import (
     AccountUsage,
+    ApiKey,
     ModelObservation,
     ModelProbe,
     ProbeOutcome,
     TransientClientError,
+    UsageTotals,
 )
 from agentrouter_prober.config import Settings, TelegramSettings
+from agentrouter_prober.key_messages import WEEK_SECONDS, completed_week_end
 from agentrouter_prober.state import StateStore, format_datetime
 
 
@@ -62,11 +67,15 @@ class FakeAgentRouter:
             raise usage
         return usage
 
-    async def fetch_probe_key_balance(self):
+    async def fetch_api_keys(self):
         balance = self.probe_key_balances.pop(0) if self.probe_key_balances else None
         if isinstance(balance, Exception):
             raise balance
-        return balance
+        remaining = None if balance is None else int(balance * 500_000)
+        return {1: ApiKey(1, "Prober", 1, remaining, 0, is_probe_key=True)}
+
+    async def quota_display_settings(self):
+        return 500_000.0, True
 
     async def probe_model(self, model):
         self.probed.append(model.name)
@@ -215,6 +224,74 @@ def test_pending_credit_alert_retries_for_its_recipient_after_restart(
         ]
         assert monitor.account_calls == 0
         assert StateStore(settings.state_path).load().credit_alerts == {}
+
+    asyncio.run(run())
+
+
+def test_selected_keys_alert_once_and_digest_retries_after_restart(state_directory, monkeypatch):
+    settings = make_settings(state_directory / "state.json")
+    monday = datetime(2026, 11, 23, tzinfo=UTC)
+    clock = [monday - timedelta(days=3)]
+    monkeypatch.setattr(prober_app, "utc_now", lambda: clock[0])
+
+    class KeyAgent(FakeAgentRouter):
+        keys = {
+            4: ApiKey(4, "Coding", 1, 900_000, 500_000),
+            5: ApiKey(5, "Coding", 1, None, 1_000_000, expires_at=int((monday + timedelta(days=2)).timestamp())),
+            8: ApiKey(8, "Prober", 1, None, 0, is_probe_key=True),
+        }
+
+        async def fetch_api_keys(self):
+            return self.keys.copy()
+
+        async def fetch_usage_totals(self, start, end):
+            self.windows.append((start, end))
+            if end == completed_week_end(monday):
+                return UsageTotals(2_000_000, 4, Counter({4: 2_000_000}), Counter({"alpha": 2_000_000}), {4: "Coding"})
+            return UsageTotals(500_000, 2)
+
+    class RateLimitedTelegram(FakeTelegram):
+        async def send(self, text, **kwargs):
+            raise TransientClientError("Telegram rate limit reached", retry_after=60)
+
+    async def run():
+        agent = KeyAgent([{}] * 5, [])
+        agent.windows = []
+        prober = Prober(settings, agent, RateLimitedTelegram())
+        await prober.set_key_alert(4, "spending", Decimal("1.00"))
+        await prober.set_key_alert(4, "balance", Decimal("1.00"))
+        await prober.set_key_alert(5, "expiry", Decimal(2))
+        prober.set_weekly_digest(True)
+        assert (await prober.run_cycle()).notifications_sent == 0
+        assert agent.windows == []
+
+        clock[0] = monday
+        agent.keys[4] = replace(agent.keys[4], name="Renamed", used_quota=1_000_000, remaining_quota=400_000)
+        assert (await prober.run_cycle()).notifications_sent == 0
+        saved = StateStore(settings.state_path).load()
+        assert len(saved.key_monitoring.key_alerts) == 3
+        assert all(alert.pending_message for alert in saved.key_monitoring.key_alerts.values())
+        assert saved.key_monitoring.weekly_digest.pending_message
+
+        clock[0] += timedelta(seconds=60)
+        group = FakeTelegram()
+        group.chat_id = "-100"
+        assert (await Prober(settings, agent, group).run_cycle()).notifications_sent == 0
+        assert group.messages == []
+        telegram = FakeTelegram()
+        restarted = Prober(settings, agent, telegram)
+        assert (await restarted.run_cycle()).notifications_sent == 4
+        assert (await restarted.run_cycle()).notifications_sent == 0
+        assert "Renamed (#4) has spent $2.00" in telegram.messages[0]
+        assert "Renamed (#4) has $0.80 left" in telegram.messages[1]
+        assert "Coding (#5) expires 2026-11-25" in telegram.messages[2]
+        assert "Spent: $4.00 · Prior week: $1.00" in telegram.messages[3]
+        assert "Coding (#4) · $4.00" in telegram.messages[3] and "alpha · $4.00" in telegram.messages[3]
+        end = int(monday.timestamp())
+        assert agent.windows == [(end - WEEK_SECONDS, end), (end - WEEK_SECONDS * 2, end - WEEK_SECONDS)]
+        saved = StateStore(settings.state_path).load().key_monitoring
+        assert saved.key_alerts == {}
+        assert saved.weekly_digest.week_end == end and saved.weekly_digest.pending_message is None
 
     asyncio.run(run())
 

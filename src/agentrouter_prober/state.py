@@ -11,6 +11,8 @@ from typing import Any, Literal
 UTC = timezone.utc
 CreditAlertKind = Literal["spending", "balance"]
 CREDIT_ALERT_KINDS: tuple[CreditAlertKind, ...] = ("spending", "balance")
+KeyAlertKind = Literal["spending", "balance", "expiry"]
+KEY_ALERT_KINDS: tuple[KeyAlertKind, ...] = (*CREDIT_ALERT_KINDS, "expiry")
 
 
 def utc_now() -> datetime:
@@ -104,6 +106,63 @@ class ProbeKeyAlert:
         return cls(fingerprint, chat_id, message if isinstance(message, str) else None)
 
 
+@dataclass(frozen=True)
+class KeyAlert:
+    key_id: int
+    kind: KeyAlertKind
+    threshold: int  # Quota units for spending and balance, days for expiry.
+    pending_message: str | None = None
+
+    @classmethod
+    def from_dict(cls, raw: object) -> KeyAlert | None:
+        if not isinstance(raw, dict):
+            return None
+        key_id, kind, threshold = raw.get("key_id"), raw.get("kind"), raw.get("threshold")
+        if (
+            type(key_id) is not int or key_id <= 0 or kind not in KEY_ALERT_KINDS
+            or type(threshold) is not int or threshold <= 0
+        ):
+            return None
+        message = raw.get("pending_message")
+        return cls(key_id, kind, threshold, message if isinstance(message, str) else None)
+
+
+@dataclass(frozen=True)
+class WeeklyDigest:
+    week_end: int
+    pending_message: str | None = None
+
+
+@dataclass(frozen=True)
+class KeyMonitoring:
+    scope: str
+    key_alerts: dict[tuple[int, KeyAlertKind], KeyAlert] = field(default_factory=dict)
+    weekly_digest: WeeklyDigest | None = None
+
+    @classmethod
+    def from_dict(cls, raw: object) -> KeyMonitoring | None:
+        if not isinstance(raw, dict) or not isinstance(raw.get("scope"), str):
+            return None
+        alerts = {}
+        if isinstance(raw.get("key_alerts"), list):
+            for item in raw["key_alerts"]:
+                if alert := KeyAlert.from_dict(item):
+                    alerts[alert.key_id, alert.kind] = alert
+        digest = None
+        saved = raw.get("weekly_digest")
+        if isinstance(saved, dict) and type(saved.get("week_end")) is int and saved["week_end"] > 0:
+            message = saved.get("pending_message")
+            digest = WeeklyDigest(saved["week_end"], message if isinstance(message, str) else None)
+        return cls(raw["scope"], alerts, digest)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "scope": self.scope,
+            "key_alerts": [asdict(alert) for alert in self.key_alerts.values()],
+            "weekly_digest": asdict(self.weekly_digest) if self.weekly_digest else None,
+        }
+
+
 @dataclass
 class PersistentState:
     version: int = 2
@@ -116,6 +175,7 @@ class PersistentState:
     poll_seconds_override: int | None = None
     credit_alerts: dict[CreditAlertKind, CreditAlert] = field(default_factory=dict)
     probe_key_alert: ProbeKeyAlert | None = None
+    key_monitoring: KeyMonitoring | None = None
 
     def model(self, name: str) -> ModelRecord:
         return self.models.setdefault(name, ModelRecord())
@@ -152,6 +212,7 @@ class PersistentState:
             ),
             credit_alerts=credit_alerts,
             probe_key_alert=ProbeKeyAlert.from_dict(raw.get("probe_key_alert")),
+            key_monitoring=KeyMonitoring.from_dict(raw.get("key_monitoring")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -170,6 +231,7 @@ class PersistentState:
                 kind: asdict(alert) for kind, alert in self.credit_alerts.items()
             },
             "probe_key_alert": asdict(self.probe_key_alert) if self.probe_key_alert else None,
+            "key_monitoring": self.key_monitoring.to_dict() if self.key_monitoring else None,
         }
 
 

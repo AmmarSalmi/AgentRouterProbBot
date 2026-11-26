@@ -13,16 +13,26 @@ from time import monotonic
 from .clients import (
     AccountUsage,
     AgentRouterClient,
+    ApiKey,
     AuthenticationError,
     ClientError,
     ModelObservation,
     ModelProbe,
     ProbeOutcome,
     ProtocolError,
+    QuotaDisplay,
     TelegramClient,
     TransientClientError,
 )
 from .config import Settings
+from .key_messages import (
+    DAY_SECONDS,
+    WEEK_SECONDS,
+    completed_week_end,
+    key_alert_confirmation,
+    key_alert_message,
+    weekly_usage_message,
+)
 from .messages import (
     availability_message,
     credit_alert_message,
@@ -32,9 +42,13 @@ from .messages import (
 from .state import (
     CreditAlert,
     CreditAlertKind,
+    KeyAlert,
+    KeyAlertKind,
+    KeyMonitoring,
     PersistentState,
     ProbeKeyAlert,
     StateStore,
+    WeeklyDigest,
     format_datetime,
     parse_datetime,
     utc_now,
@@ -43,6 +57,23 @@ from .state import (
 
 LOGGER = logging.getLogger(__name__)
 UTC = timezone.utc
+
+
+def _amount_in_quota(amount: Decimal, display: QuotaDisplay, dollar_sign: bool) -> int:
+    quota_per_unit, display_in_currency = display
+    if display_in_currency and quota_per_unit > 0:
+        return ceil(amount * Decimal(str(quota_per_unit)))
+    if dollar_sign or amount != amount.to_integral_value():
+        raise ValueError("This account uses quota units. Enter a whole number.")
+    return int(amount)
+
+
+def _key_alert_due(key: ApiKey, alert: KeyAlert, now: int) -> bool:
+    if alert.kind == "spending":
+        return key.used_quota >= alert.threshold
+    if alert.kind == "balance":
+        return key.remaining_quota is not None and key.remaining_quota < alert.threshold
+    return 0 < key.expires_at <= now + alert.threshold * DAY_SECONDS
 
 
 @dataclass(frozen=True)
@@ -117,12 +148,8 @@ class Prober:
         usage = await self.account_usage()
         if kind == "balance" and usage.quota < 0:
             raise ValueError("A low-balance alert needs a finite account balance.")
-        if usage.display_in_currency and usage.quota_per_unit > 0:
-            threshold = ceil(amount * Decimal(str(usage.quota_per_unit)))
-        else:
-            if dollar_sign or amount != amount.to_integral_value():
-                raise ValueError("This account uses quota units. Enter a whole number.")
-            threshold = int(amount)
+        display = usage.quota_per_unit, usage.display_in_currency
+        threshold = _amount_in_quota(amount, display, dollar_sign)
 
         if kind == "spending":
             threshold += usage.used_quota
@@ -171,7 +198,101 @@ class Prober:
                     alert, pending_message=credit_alert_message(kind, usage, threshold)
                 )
 
-    async def _check_probe_key_balance(self) -> None:
+    def _monitoring_scope(self) -> str | None:
+        chat_id = self.telegram.chat_id
+        if not chat_id or not chat_id.removeprefix("+").isdecimal() or int(chat_id) <= 0:
+            return None
+        account = f"{self.settings.agentrouter_base_url}\0{self.settings.agentrouter_user_id}"
+        return sha256(f"{account}\0{int(chat_id)}".encode()).hexdigest()
+
+    @property
+    def key_monitoring(self) -> KeyMonitoring | None:
+        monitoring = self.state.key_monitoring
+        return monitoring if monitoring and monitoring.scope == self._monitoring_scope() else None
+
+    def _save_key_monitoring(self, monitoring: KeyMonitoring) -> None:
+        self.store.save(replace(self.state, key_monitoring=monitoring))
+        self.state.key_monitoring = monitoring
+
+    async def api_key(self, key_id: int) -> ApiKey:
+        keys = await self.agentrouter.fetch_api_keys()
+        if key_id not in keys:
+            raise ValueError("This API key is no longer listed. Open API Keys to choose another.")
+        return keys[key_id]
+
+    async def set_key_alert(
+        self, key_id: int, kind: KeyAlertKind, amount: Decimal, *, dollar_sign: bool = False
+    ) -> str:
+        scope = self._monitoring_scope()
+        if scope is None:
+            raise ValueError("API key alerts require a private Telegram chat.")
+        if not amount.is_finite() or amount <= 0:
+            raise ValueError("Enter a positive amount.")
+        key = await self.api_key(key_id)
+        display = await self.agentrouter.quota_display_settings()
+        now = int(utc_now().timestamp())
+        if kind == "expiry":
+            if dollar_sign or amount != amount.to_integral_value():
+                raise ValueError("Enter a whole number of days before expiry.")
+            if key.expires_at <= now:
+                raise ValueError("The key needs a future expiry date for a reminder.")
+            threshold = int(amount)
+        else:
+            if kind == "balance" and key.remaining_quota is None:
+                raise ValueError("This key has unlimited quota. Choose a spending alert instead.")
+            threshold = _amount_in_quota(amount, display, dollar_sign)
+            if kind == "spending":
+                threshold += key.used_quota
+        alert = KeyAlert(key_id, kind, threshold)
+        if _key_alert_due(key, alert, now):
+            alert = replace(alert, pending_message=key_alert_message(key, alert, display))
+        monitoring = self.key_monitoring or KeyMonitoring(scope)
+        alerts = {**monitoring.key_alerts, (key_id, kind): alert}
+        self._save_key_monitoring(replace(monitoring, key_alerts=alerts))
+        return key_alert_confirmation(key, alert, display)
+
+    def clear_key_alerts(self, key_id: int) -> None:
+        monitoring = self.key_monitoring
+        if monitoring:
+            alerts = {slot: alert for slot, alert in monitoring.key_alerts.items() if slot[0] != key_id}
+            self._save_key_monitoring(replace(monitoring, key_alerts=alerts))
+
+    def set_weekly_digest(self, enabled: bool) -> None:
+        scope = self._monitoring_scope()
+        if scope is None:
+            raise ValueError("Weekly digests require a private Telegram chat.")
+        monitoring = self.key_monitoring or KeyMonitoring(scope)
+        if enabled == (monitoring.weekly_digest is not None):
+            return
+        digest = WeeklyDigest(completed_week_end(utc_now())) if enabled else None
+        self._save_key_monitoring(replace(monitoring, weekly_digest=digest))
+
+    async def weekly_usage(self, end: int | None = None) -> str:
+        week_end = completed_week_end(utc_now()) if end is None else end
+        start = week_end - WEEK_SECONDS
+        current = await self.agentrouter.fetch_usage_totals(start, week_end)
+        previous = await self.agentrouter.fetch_usage_totals(start - WEEK_SECONDS, start)
+        display = await self.agentrouter.quota_display_settings()
+        return weekly_usage_message(week_end, current, previous, display)
+
+    async def _check_weekly_digest(self, now: datetime) -> None:
+        monitoring = self.key_monitoring
+        digest = monitoring.weekly_digest if monitoring else None
+        week_end = completed_week_end(now)
+        if not digest or digest.pending_message or week_end <= digest.week_end:
+            return
+        try:
+            message = await self.weekly_usage(week_end)
+        except ClientError as exc:
+            LOGGER.warning("AgentRouter weekly digest check failed: %s", exc)
+            return
+        monitoring = self.key_monitoring
+        if monitoring and monitoring.weekly_digest is digest:
+            self.state.key_monitoring = replace(
+                monitoring, weekly_digest=WeeklyDigest(week_end, message)
+            )
+
+    async def _check_key_alerts(self, now: datetime) -> None:
         chat_id = self.telegram.chat_id
         alert = self.state.probe_key_alert
         if alert and (
@@ -182,21 +303,42 @@ class Prober:
         if not chat_id:
             return
 
+        monitoring = self.key_monitoring
+        alerts = list(monitoring.key_alerts.items()) if monitoring else []
         try:
-            balance = await self.agentrouter.fetch_probe_key_balance()
+            keys = await self.agentrouter.fetch_api_keys()
         except ClientError as exc:
-            LOGGER.warning("AgentRouter probe key balance check failed: %s", exc)
+            LOGGER.warning("AgentRouter API key check failed: %s", exc)
             return
 
-        threshold = self.settings.probe_key_low_balance_usd
-        if balance is None or balance >= threshold:
+        probe_key = next((key for key in keys.values() if key.is_probe_key), None)
+        remaining = probe_key.remaining_quota if probe_key else None
+        if probe_key is None:
+            LOGGER.warning("Configured probe key was not found in the dashboard key list")
+        elif remaining is None:
             self.state.probe_key_alert = None
-        elif alert is None or alert.pending_message is not None:
-            self.state.probe_key_alert = ProbeKeyAlert(
-                self._probe_key_fingerprint,
-                chat_id,
-                probe_key_balance_message(balance, threshold),
-            )
+        if remaining is None and not alerts:
+            return
+        display = await self.agentrouter.quota_display_settings()
+        if remaining is not None:
+            balance = Decimal(remaining) / Decimal(str(display[0]))
+            threshold = self.settings.probe_key_low_balance_usd
+            if balance >= threshold:
+                self.state.probe_key_alert = None
+            elif alert is None or alert.pending_message is not None:
+                self.state.probe_key_alert = ProbeKeyAlert(
+                    self._probe_key_fingerprint, chat_id, probe_key_balance_message(balance, threshold)
+                )
+        monitoring = self.key_monitoring
+        if monitoring:
+            for slot, key_alert in alerts:
+                if monitoring.key_alerts.get(slot) is not key_alert or key_alert.pending_message:
+                    continue
+                key = keys.get(key_alert.key_id)
+                if key and _key_alert_due(key, key_alert, int(now.timestamp())):
+                    monitoring.key_alerts[slot] = replace(
+                        key_alert, pending_message=key_alert_message(key, key_alert, display)
+                    )
 
     async def status_snapshot(self) -> PersistentState:
         was_running = self._cycle_lock.locked()
@@ -231,7 +373,14 @@ class Prober:
         ]
         probe_key_alert = self.state.probe_key_alert
         probe_key_message = probe_key_alert.pending_message if probe_key_alert else None
-        if not (pending_models or credit_notifications or probe_key_message):
+        monitoring = self.key_monitoring
+        key_notifications = (
+            [(slot, alert) for slot, alert in monitoring.key_alerts.items() if alert.pending_message]
+            if monitoring else []
+        )
+        digest = monitoring.weekly_digest if monitoring else None
+        digest_message = digest.pending_message if digest else None
+        if not (pending_models or credit_notifications or probe_key_message or key_notifications or digest_message):
             return 0, False
         retry_at = parse_datetime(self.state.telegram_retry_at)
         if retry_at is not None and utc_now() < retry_at:
@@ -259,6 +408,24 @@ class Prober:
                 await self.telegram.send(probe_key_message)
                 sent += 1
                 self.state.probe_key_alert = replace(probe_key_alert, pending_message=None)
+            for slot, alert in key_notifications:
+                monitoring = self.key_monitoring
+                if not monitoring or monitoring.key_alerts.get(slot) is not alert or not alert.pending_message:
+                    continue
+                await self.telegram.send(alert.pending_message)
+                sent += 1
+                monitoring = self.key_monitoring
+                if monitoring and monitoring.key_alerts.get(slot) is alert:
+                    del monitoring.key_alerts[slot]
+            monitoring = self.key_monitoring
+            if digest and digest_message and monitoring and monitoring.weekly_digest is digest:
+                await self.telegram.send(digest_message)
+                sent += 1
+                monitoring = self.key_monitoring
+                if monitoring and monitoring.weekly_digest is digest:
+                    self.state.key_monitoring = replace(
+                        monitoring, weekly_digest=replace(digest, pending_message=None)
+                    )
         except TransientClientError as exc:
             self.state.last_error = str(exc)
             LOGGER.warning("Telegram notification will be retried: %s", exc)
@@ -280,7 +447,8 @@ class Prober:
         try:
             dashboard_ok, fatal = await self._probe_models(cycle_time)
             await self._check_credit_alerts()
-            await self._check_probe_key_balance()
+            await self._check_key_alerts(cycle_time)
+            await self._check_weekly_digest(cycle_time)
             sent, notification_fatal = await self._deliver_pending_notifications(cycle_time)
             return CycleResult(dashboard_ok, fatal or notification_fatal, sent)
         finally:
