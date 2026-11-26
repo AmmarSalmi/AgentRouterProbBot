@@ -42,15 +42,15 @@ AgentRouter dashboard access token as `Authorization: Bearer <token>` and the
 matching numeric account ID as `New-Api-User: <account-id>` to read balance and
 model status.
 
-In your existing `.env.vps`, set the access token generated in the AgentRouter
-dashboard and the numeric ID for the same account.
+In your Compose environment file, set the access token generated in the
+AgentRouter dashboard and the numeric ID for the same account.
 
 ```dotenv
 AGENTROUTER_DASHBOARD_TOKEN=your-dashboard-access-token
 AGENTROUTER_USER_ID=12345
 ```
 
-Remove `ZEN_PROFILE_PATH` and `AGENTROUTER_SESSION_COOKIE` from `.env.vps`. If
+Remove `ZEN_PROFILE_PATH` and `AGENTROUTER_SESSION_COOKIE` from that file. If
 you use a custom Compose file, remove its `/zen-profile` mount. The bot uses
 `AGENTROUTER_API_KEY` for live model probes and `TELEGRAM_BOT_TOKEN` for Telegram.
 
@@ -62,13 +62,15 @@ docker compose up -d --build prober
 
 ## Start with Docker
 
-The checked-in Compose file uses the same folder layout as the VPS file.
+Both Compose files default to `.env` in the repository directory on Windows
+and Linux. For a new install, copy `.env.example` to `.env` and fill in the
+credentials above. If you already have `.env.vps`, rename it to `.env` or copy
+its settings into your existing `.env`.
+
 Prepare `data/` and `codex/` as described in the VPS guide, then run these
 commands from the repository directory. [VPS setup](VPS_SETUP.md#2-set-linux-permissions-and-credentials)
 
 ```sh
-cp .env.example .env.vps
-# Fill in the model API key, dashboard token, account ID, and Telegram bot token.
 docker compose build
 docker compose run --rm prober --test-telegram
 # When it says "Waiting for /start", open the bot and press Start.

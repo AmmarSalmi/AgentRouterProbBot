@@ -4,7 +4,7 @@ services:
       context: .
     user: "10001:10001"
     env_file:
-      - ${ENV_FILE:-.env.vps}
+      - ${ENV_FILE:-.env}
     environment:
       CODEX_CONFIG_PATH: /codex/config.toml
       STATE_PATH: /data/state.json
