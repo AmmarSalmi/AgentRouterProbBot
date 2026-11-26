@@ -36,8 +36,7 @@ def make_settings(directory: Path) -> Settings:
         request_timeout_seconds=90,
         state_path=directory / "state.json",
         health_max_age_seconds=3600,
-        zen_profile_path=None,
-        agentrouter_session_cookie="session",
+        agentrouter_dashboard_token="dashboard-token",
         agentrouter_user_id=1,
         codex_config_path=config,
         client_user_agent="codex_cli_rs/test",
@@ -180,14 +179,14 @@ def test_usage_alias_reports_account_errors_without_stopping_commands(state_dire
     class FailingAgent(FakeAgent):
         async def fetch_account_usage(self):
             self.account_calls += 1
-            raise ProtocolError("session expired")
+            raise ProtocolError("invalid account response")
 
     settings = make_settings(state_directory)
     agent, telegram = FailingAgent(), FakeTelegram()
     commands = TelegramCommands(Prober(settings, agent, telegram))
     asyncio.run(commands.handle_update(message("/usage")))
     assert agent.account_calls == 1
-    assert telegram.sent[-1][0] == "AgentRouter balance check failed: session expired"
+    assert telegram.sent[-1][0] == "AgentRouter balance check failed: invalid account response"
 
 
 def test_codex_picker_only_shows_responses_models(state_directory):

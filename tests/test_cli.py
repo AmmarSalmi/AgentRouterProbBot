@@ -5,11 +5,10 @@ import signal
 import httpx
 import pytest
 
-from agentrouter_prober import cli, config
-from agentrouter_prober.config import ConfigurationError, Settings
+from agentrouter_prober import cli
+from agentrouter_prober.config import Settings
 from agentrouter_prober.state import StateStore, health_is_fresh
 from agentrouter_prober.telegram import CONNECTED_MESSAGE, TelegramRegistrationStore
-from test_browser_session import make_profile
 
 
 @pytest.fixture
@@ -19,11 +18,9 @@ def configured_env(monkeypatch, state_directory):
         "TELEGRAM_API_BASE_URL": "https://telegram.test",
         "TELEGRAM_CHAT_ID": "",
         "AGENTROUTER_API_KEY": "sk-test",
-        "AGENTROUTER_DASHBOARD_TOKEN": "",
-        "AGENTROUTER_SESSION_COOKIE": "session-test",
+        "AGENTROUTER_DASHBOARD_TOKEN": "dashboard-token",
         "AGENTROUTER_USER_ID": "60923",
         "AGENTROUTER_BASE_URL": "https://agentrouter.test",
-        "ZEN_PROFILE_PATH": str(state_directory / "zen-profile"),
         "CODEX_CONFIG_PATH": str(state_directory / "config.toml"),
         "POLL_SECONDS": "900",
         "STATE_PATH": str(state_directory / "state.json"),
@@ -79,10 +76,8 @@ def telegram_response(sent):
 def test_telegram_only_mode_registers_without_agentrouter_credentials(configured_env, monkeypatch):
     monkeypatch.delenv("AGENTROUTER_API_KEY")
     monkeypatch.delenv("CODEX_GATEWAY_API_KEY", raising=False)
-    monkeypatch.delenv("AGENTROUTER_SESSION_COOKIE")
+    monkeypatch.delenv("AGENTROUTER_DASHBOARD_TOKEN")
     monkeypatch.delenv("AGENTROUTER_USER_ID")
-    monkeypatch.delenv("ZEN_PROFILE_PATH")
-    monkeypatch.setenv("APPDATA", "")
     sent = []
     telegram = telegram_response(sent)
 
@@ -101,47 +96,32 @@ def test_telegram_only_mode_registers_without_agentrouter_credentials(configured
     assert clients and all(client.is_closed for client in clients)
 
 
-def test_check_session_works_without_network_or_bot_credentials(
-    configured_env, monkeypatch, state_directory
+@pytest.mark.parametrize(
+    "name,value,reason",
+    [
+        ("AGENTROUTER_DASHBOARD_TOKEN", " ", "is required"),
+        ("AGENTROUTER_USER_ID", "", "is required"),
+        ("AGENTROUTER_USER_ID", "zero", "must be an integer"),
+        ("AGENTROUTER_USER_ID", "0", "must be greater than zero"),
+    ],
+)
+def test_cli_rejects_invalid_dashboard_credentials(
+    configured_env, monkeypatch, caplog, name, value, reason
 ):
-    make_profile(state_directory)
-    monkeypatch.setenv("ZEN_PROFILE_PATH", str(state_directory))
-    monkeypatch.setenv("AGENTROUTER_BASE_URL", "https://agentrouter.org")
-    for name in ("AGENTROUTER_API_KEY", "CODEX_GATEWAY_API_KEY", "TELEGRAM_BOT_TOKEN"):
-        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(name, value)
     monkeypatch.setattr(
-        httpx, "AsyncClient", lambda *args, **kwargs: pytest.fail("Session checks must stay offline")
+        httpx, "AsyncClient", lambda **kwargs: pytest.fail("Network initialized with invalid credentials")
     )
-    assert cli.main(["--check-session"]) == 0
 
-
-def test_check_session_reports_missing_login(configured_env, monkeypatch, state_directory):
-    make_profile(state_directory, with_user=False)
-    monkeypatch.setenv("ZEN_PROFILE_PATH", str(state_directory))
-    monkeypatch.setenv("AGENTROUTER_BASE_URL", "https://agentrouter.org")
-    assert cli.main(["--check-session"]) == 2
-
-
-@pytest.mark.parametrize("user_id", ["", "zero", "0"])
-def test_dashboard_token_requires_positive_user_id(configured_env, monkeypatch, user_id):
-    monkeypatch.setenv("AGENTROUTER_DASHBOARD_TOKEN", "dashboard-token")
-    monkeypatch.setenv("AGENTROUTER_USER_ID", user_id)
-    with pytest.raises(ConfigurationError, match="AGENTROUTER_USER_ID"):
-        Settings.from_env()
+    assert cli.main(["--once"]) == 2
+    assert f"{name} {reason}" in caplog.text
+    assert not configured_env.exists()
 
 
 @pytest.mark.parametrize("once", [True, False])
-@pytest.mark.parametrize("dashboard_token", ["", "dashboard-token"])
 def test_polling_starts_after_registration_and_delivers_alerts(
-    configured_env, monkeypatch, once, dashboard_token, completed_response
+    configured_env, monkeypatch, once, completed_response
 ):
-    if dashboard_token:
-        monkeypatch.setenv("AGENTROUTER_DASHBOARD_TOKEN", dashboard_token)
-        monkeypatch.delenv("AGENTROUTER_SESSION_COOKIE")
-        monkeypatch.delenv("ZEN_PROFILE_PATH")
-        monkeypatch.setattr(
-            config, "_discover_zen_profile", lambda: pytest.fail("Zen discovery ran")
-        )
     sent, model_requests = [], []
     telegram = telegram_response(sent)
 
@@ -154,12 +134,8 @@ def test_polling_starts_after_registration_and_delivers_alerts(
         model_requests.append(request.url.path)
         if request.url.path == "/api/user/model-status":
             assert request.headers["new-api-user"] == "60923"
-            if dashboard_token:
-                assert request.headers["authorization"] == f"Bearer {dashboard_token}"
-                assert "cookie" not in request.headers
-            else:
-                assert request.headers["cookie"] == "session=session-test"
-                assert "authorization" not in request.headers
+            assert request.headers["authorization"] == "Bearer dashboard-token"
+            assert "cookie" not in request.headers
             return httpx.Response(200, json={"success": True, "data": {"models": [{
                 "name": "gpt-6-astra", "status": "operational", "current_tier": "ok",
                 "apis": ["responses"],

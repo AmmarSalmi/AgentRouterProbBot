@@ -6,7 +6,6 @@ services:
     env_file:
       - ${ENV_FILE:-.env.vps}
     environment:
-      ZEN_PROFILE_PATH: /zen-profile
       CODEX_CONFIG_PATH: /codex/config.toml
       STATE_PATH: /data/state.json
     restart: unless-stopped
@@ -20,12 +19,6 @@ services:
         target: /data
         bind:
           create_host_path: false
-      - type: bind
-        source: ./zen-profile
-        target: /zen-profile
-        read_only: true
-        bind:
-          create_host_path: true
       - type: bind
         source: ./codex
         target: /codex

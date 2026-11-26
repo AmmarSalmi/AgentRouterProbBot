@@ -13,7 +13,6 @@ from typing import Any
 
 from .app import Prober
 from .bot import run_bot
-from .browser_session import BrowserSessionError, ZenSessionLoader
 from .clients import (
     AgentRouterClient,
     AuthenticationError,
@@ -21,7 +20,7 @@ from .clients import (
     TelegramClient,
     TransientClientError,
 )
-from .config import ConfigurationError, Settings, TelegramSettings, _discover_zen_profile, _url
+from .config import ConfigurationError, Settings, TelegramSettings
 from .state import health_is_fresh
 from .telegram import resolve_telegram_chat
 
@@ -36,11 +35,6 @@ def _parser() -> argparse.ArgumentParser:
         "--test-telegram",
         action="store_true",
         help="Send a Telegram test message without contacting AgentRouter",
-    )
-    modes.add_argument(
-        "--check-session",
-        action="store_true",
-        help="Check the local Zen session files without making network requests",
     )
     modes.add_argument(
         "--healthcheck",
@@ -168,16 +162,6 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if health_is_fresh(path, max_age) else 1
         if args.test_telegram:
             return asyncio.run(_test_telegram())
-        if args.check_session:
-            profile = _discover_zen_profile()
-            if profile is None:
-                raise ConfigurationError("ZEN_PROFILE_PATH is required to check the session files")
-            try:
-                ZenSessionLoader(profile, _url("AGENTROUTER_BASE_URL", "https://agentrouter.org")).load()
-            except BrowserSessionError as exc:
-                raise ConfigurationError(str(exc)) from exc
-            print("AgentRouter session files are readable and contain a local login.")
-            return 0
         return asyncio.run(_run(Settings.from_env(), args.once))
     except ConfigurationError as exc:
         logging.getLogger(__name__).error("Configuration error: %s", exc)

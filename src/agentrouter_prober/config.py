@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import configparser
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,27 +18,16 @@ def _required_any(*names: str) -> str:
     raise ConfigurationError(f"{' or '.join(names)} is required")
 
 
-def _positive_int(name: str, default: int, *fallback_names: str) -> int:
+def _positive_int(name: str, default: int | None = None, *fallback_names: str) -> int:
     raw = ""
     for candidate in (name, *fallback_names):
         raw = os.getenv(candidate, "").strip()
         if raw:
             break
     if not raw:
+        if default is None:
+            raise ConfigurationError(f"{name} is required")
         raw = str(default)
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise ConfigurationError(f"{name} must be an integer") from exc
-    if value <= 0:
-        raise ConfigurationError(f"{name} must be greater than zero")
-    return value
-
-
-def _optional_positive_int(name: str) -> int | None:
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return None
     try:
         value = int(raw)
     except ValueError as exc:
@@ -55,47 +43,6 @@ def _url(name: str, default: str) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ConfigurationError(f"{name} must be an HTTP(S) URL")
     return value
-
-
-def _discover_zen_profile() -> Path | None:
-    explicit = os.getenv("ZEN_PROFILE_PATH", "").strip()
-    if explicit:
-        return Path(explicit).expanduser()
-
-    appdata = os.getenv("APPDATA", "").strip()
-    if not appdata:
-        return None
-    root = Path(appdata) / "zen"
-    ini_path = root / "profiles.ini"
-    if not ini_path.is_file():
-        return None
-
-    parser = configparser.ConfigParser()
-    try:
-        parser.read(ini_path, encoding="utf-8")
-    except (OSError, configparser.Error):
-        return None
-
-    candidates: list[tuple[int, Path]] = []
-    for section in parser.sections():
-        if not (section.startswith("Profile") or section.startswith("Install")):
-            continue
-        raw_path = parser.get(section, "Path", fallback="") or parser.get(
-            section, "Default", fallback=""
-        )
-        if not raw_path:
-            continue
-        path = Path(raw_path)
-        if parser.get(section, "IsRelative", fallback="1") != "0":
-            path = root / path
-        priority = 2 if parser.get(section, "Default", fallback="0") == "1" else 1
-        if section.startswith("Install"):
-            priority = 3
-        candidates.append((priority, path))
-    for _, candidate in sorted(candidates, key=lambda item: item[0], reverse=True):
-        if (candidate / "cookies.sqlite").is_file():
-            return candidate
-    return None
 
 
 def _codex_config_path() -> Path:
@@ -127,6 +74,8 @@ class TelegramSettings:
 class Settings:
     agentrouter_base_url: str
     agentrouter_api_key: str
+    agentrouter_dashboard_token: str = field(repr=False)
+    agentrouter_user_id: int
     telegram: TelegramSettings
     poll_seconds: int
     probe_max_output_tokens: int
@@ -134,13 +83,9 @@ class Settings:
     request_timeout_seconds: int
     state_path: Path
     health_max_age_seconds: int
-    zen_profile_path: Path | None
-    agentrouter_session_cookie: str | None
-    agentrouter_user_id: int | None
     codex_config_path: Path
     client_user_agent: str
     reasoning_effort: str = "low"
-    agentrouter_dashboard_token: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -150,28 +95,6 @@ class Settings:
                 "PROBE_REASONING_EFFORT must be minimal, low, medium, or high"
             )
 
-        dashboard_token = os.getenv("AGENTROUTER_DASHBOARD_TOKEN", "").strip() or None
-        user_id = _optional_positive_int("AGENTROUTER_USER_ID")
-        session_cookie = None
-        zen_profile = None
-        if dashboard_token is not None:
-            if user_id is None:
-                raise ConfigurationError(
-                    "AGENTROUTER_DASHBOARD_TOKEN requires AGENTROUTER_USER_ID"
-                )
-        else:
-            session_cookie = os.getenv("AGENTROUTER_SESSION_COOKIE", "").strip() or None
-            if bool(session_cookie) != bool(user_id):
-                raise ConfigurationError(
-                    "AGENTROUTER_SESSION_COOKIE and AGENTROUTER_USER_ID must be set together"
-                )
-            zen_profile = _discover_zen_profile()
-            if session_cookie is None and zen_profile is None:
-                raise ConfigurationError(
-                    "Configure AGENTROUTER_DASHBOARD_TOKEN with AGENTROUTER_USER_ID, "
-                    "AGENTROUTER_SESSION_COOKIE with AGENTROUTER_USER_ID, or ZEN_PROFILE_PATH"
-                )
-
         return cls(
             agentrouter_base_url=_url(
                 "AGENTROUTER_BASE_URL", "https://agentrouter.org"
@@ -179,6 +102,8 @@ class Settings:
             agentrouter_api_key=_required_any(
                 "AGENTROUTER_API_KEY", "CODEX_GATEWAY_API_KEY"
             ),
+            agentrouter_dashboard_token=_required_any("AGENTROUTER_DASHBOARD_TOKEN"),
+            agentrouter_user_id=_positive_int("AGENTROUTER_USER_ID"),
             telegram=TelegramSettings.from_env(),
             poll_seconds=_positive_int("POLL_SECONDS", 900, "NORMAL_POLL_SECONDS"),
             probe_max_output_tokens=_positive_int(
@@ -188,14 +113,10 @@ class Settings:
             request_timeout_seconds=_positive_int("REQUEST_TIMEOUT_SECONDS", 90),
             state_path=Path(os.getenv("STATE_PATH", "/data/state.json")),
             health_max_age_seconds=_positive_int("HEALTH_MAX_AGE_SECONDS", 3600),
-            zen_profile_path=zen_profile,
-            agentrouter_session_cookie=session_cookie,
-            agentrouter_user_id=user_id,
             codex_config_path=_codex_config_path(),
             client_user_agent=os.getenv(
                 "AGENTROUTER_CLIENT_USER_AGENT",
                 "codex_cli_rs/0.171.0 (Windows 11; x86_64)",
             ).strip(),
             reasoning_effort=reasoning_effort,
-            agentrouter_dashboard_token=dashboard_token,
         )

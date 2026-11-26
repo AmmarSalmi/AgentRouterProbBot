@@ -4,7 +4,7 @@
 
 `src/agentrouter_prober/` contains the Python package. `cli.py` starts the service, `app.py` coordinates probe cycles, `clients.py` handles AgentRouter HTTP requests, and `bot.py` and `telegram.py` handle Telegram commands and notifications.
 
-`tests/` holds the pytest suite, with shared fixtures in `tests/conftest.py`. `scripts/export_zen_session.py` is the Zen session export entry point. `examples/` contains a sample Codex configuration. The `Dockerfile` and Compose files define container deployment.
+`tests/` holds the pytest suite, with shared fixtures in `tests/conftest.py`. `examples/` contains a sample Codex configuration. The `Dockerfile` and Compose files define container deployment.
 
 ## Build, Test, and Development
 
@@ -21,7 +21,7 @@ Use four spaces per indentation level, `snake_case` for modules and functions, `
 
 ## Testing Guidelines
 
-Use pytest 8. Name files `test_<module>.py` and functions `test_<behavior>`. Run `python -m pytest tests/test_clients.py` for a focused check. Keep tests offline with `httpx.MockTransport` and synthetic SQLite profiles or TOML configs. Exercise relevant error and retry paths when changing request or notification handling.
+Use pytest 8. Name files `test_<module>.py` and functions `test_<behavior>`. Run `python -m pytest tests/test_clients.py` for a focused check. Keep tests offline with `httpx.MockTransport` and synthetic TOML configs. Exercise relevant error and retry paths when changing request or notification handling.
 
 ## Commits and Pull Requests
 
@@ -29,4 +29,4 @@ Use an imperative commit subject like the initial commit, `Add AgentRouter Teleg
 
 ## Configuration and Secrets
 
-Document environment variable changes in `README.md` and the applicable `.env` example file. Keep live `.env` files, browser session exports, and runtime state out of Git.
+Document environment variable changes in `README.md` and the applicable `.env` example file. Keep live `.env` files and runtime state out of Git.

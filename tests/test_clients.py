@@ -1,5 +1,4 @@
 import asyncio
-from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -29,19 +28,18 @@ def settings() -> Settings:
         request_timeout_seconds=90,
         state_path=Path("state.json"),
         health_max_age_seconds=3600,
-        zen_profile_path=None,
-        agentrouter_session_cookie="browser-session",
+        agentrouter_dashboard_token="dashboard-token",
         agentrouter_user_id=60923,
         codex_config_path=Path("config.toml"),
         client_user_agent="codex_cli_rs/test",
     )
 
 
-def test_status_uses_browser_session_and_parses_only_returned_models():
+def test_status_uses_dashboard_token_and_parses_only_returned_models():
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.headers["Cookie"] == "session=browser-session"
+        assert "cookie" not in request.headers
         assert request.headers["New-Api-User"] == "60923"
-        assert "authorization" not in request.headers
+        assert request.headers["Authorization"] == "Bearer dashboard-token"
         return httpx.Response(
             200,
             json={
@@ -69,7 +67,9 @@ def test_status_uses_browser_session_and_parses_only_returned_models():
         )
 
     async def run():
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), cookies={"session": "stale"}
+        ) as http:
             models = await AgentRouterClient(settings(), http).fetch_model_status()
             assert list(models) == ["gpt-6.2-sol", "claude-opus-5-5"]
             assert models["gpt-6.2-sol"].codex_compatible
@@ -79,24 +79,7 @@ def test_status_uses_browser_session_and_parses_only_returned_models():
     asyncio.run(run())
 
 
-def test_status_auth_failure_inside_http_200_is_recognized():
-    async def run():
-        async with httpx.AsyncClient(
-            transport=httpx.MockTransport(
-                lambda request: httpx.Response(
-                    200,
-                    json={"success": False, "message": "New-Api-User mismatch"},
-                )
-            )
-        ) as http:
-            with pytest.raises(AuthenticationError):
-                await AgentRouterClient(settings(), http).fetch_model_status()
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize("token", [None, "dashboard-token"])
-def test_account_usage_reads_balance_and_consumption(token):
+def test_account_usage_reads_balance_and_consumption():
     paths = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -117,14 +100,11 @@ def test_account_usage_reads_balance_and_consumption(token):
             )
         assert request.url.path == "/api/user/self"
         assert request.headers["New-Api-User"] == "60923"
-        if token is None:
-            assert request.headers["Cookie"] == "session=browser-session"
-            assert "authorization" not in request.headers
-        else:
-            assert request.headers["Authorization"] == f"Bearer {token}"
-            assert "cookie" not in request.headers
+        assert request.headers["Authorization"] == "Bearer dashboard-token"
+        assert "cookie" not in request.headers
         return httpx.Response(
             200,
+            headers={"Set-Cookie": "session=server-issued; Path=/"},
             json={
                 "success": True,
                 "data": {
@@ -137,9 +117,8 @@ def test_account_usage_reads_balance_and_consumption(token):
         )
 
     async def run():
-        config = replace(settings(), agentrouter_dashboard_token=token)
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-            usage = await AgentRouterClient(config, http).fetch_account_usage()
+            usage = await AgentRouterClient(settings(), http).fetch_account_usage()
             assert usage == AccountUsage(6250000, 2500000, 321, "vip", 500000.0, True)
             assert paths == ["/api/user/self", "/api/status"]
 
@@ -161,14 +140,13 @@ def test_account_usage_reads_balance_and_consumption(token):
         ),
     ],
 )
-def test_dashboard_token_auth_failures_give_token_mode_guidance(response, expected_message):
+def test_dashboard_auth_failures_give_credential_guidance(response, expected_message):
     async def run():
-        config = replace(settings(), agentrouter_dashboard_token="dashboard-token")
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(lambda request: response)
         ) as http:
             with pytest.raises(AuthenticationError, match=expected_message):
-                await AgentRouterClient(config, http).fetch_model_status()
+                await AgentRouterClient(settings(), http).fetch_model_status()
 
     asyncio.run(run())
 
@@ -223,9 +201,8 @@ def test_probe_selects_api_advertised_by_model_status(
         return httpx.Response(200, json=response)
 
     async def run():
-        config = replace(settings(), agentrouter_dashboard_token="dashboard-token")
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-            result = await AgentRouterClient(config, http).probe_model(observation)
+            result = await AgentRouterClient(settings(), http).probe_model(observation)
             assert result.outcome is ProbeOutcome.AVAILABLE
             assert result.reply == "OK"
 

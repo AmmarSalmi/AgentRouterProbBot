@@ -6,8 +6,7 @@ model through its advertised API. It reports model
 availability, reports the account balance and total consumption, and provides a
 picker for Codex's default model.
 
-For a Linux VPS, follow [VPS_SETUP.md](VPS_SETUP.md). It covers dashboard-token
-setup and the optional Windows Zen session export.
+For a Linux VPS, follow the [VPS setup guide](VPS_SETUP.md).
 
 By default, a full discovery and probe cycle runs every 15 minutes, with at most
 two model requests in parallel and a 32-token output limit per request. Model
@@ -27,12 +26,6 @@ You need:
    numeric account ID. The bot uses both for balance and model discovery,
    including the live list used by availability probes and the Codex picker.
 
-The dashboard token takes precedence when configured, and the bot skips Zen
-profile discovery. For cookie authentication, leave the dashboard token blank
-and provide `AGENTROUTER_SESSION_COOKIE` with `AGENTROUTER_USER_ID`. To let the
-bot read both values directly from Zen, leave all three variables blank and
-open the model-status page in a logged-in Zen profile before starting the bot.
-
 Leave `TELEGRAM_CHAT_ID` blank or omit it. The first person who sends `/start`
 in the bot's private chat becomes its saved recipient. An explicitly configured
 chat ID skips registration.
@@ -41,11 +34,37 @@ The Codex picker requires an existing `config.toml` with a
 `[model_providers.AgentRouter]` provider. The config directory must be writable
 so the bot can create its backup and replace the file.
 
+## Upgrading to v0.2.1
+
+Earlier versions could authenticate dashboard requests through a Zen browser
+profile or a session cookie. Starting with `v0.2.1`, the bot sends the raw
+AgentRouter dashboard access token as `Authorization: Bearer <token>` and the
+matching numeric account ID as `New-Api-User: <account-id>` to read balance and
+model status.
+
+In your existing `.env.vps`, set the access token generated in the AgentRouter
+dashboard and the numeric ID for the same account.
+
+```dotenv
+AGENTROUTER_DASHBOARD_TOKEN=your-dashboard-access-token
+AGENTROUTER_USER_ID=12345
+```
+
+Remove `ZEN_PROFILE_PATH` and `AGENTROUTER_SESSION_COOKIE` from `.env.vps`. If
+you use a custom Compose file, remove its `/zen-profile` mount. The bot uses
+`AGENTROUTER_API_KEY` for live model probes and `TELEGRAM_BOT_TOKEN` for Telegram.
+
+From the updated checkout, rebuild and restart the service.
+
+```sh
+docker compose up -d --build prober
+```
+
 ## Start with Docker
 
 The checked-in Compose file uses the same folder layout as the VPS file.
 Prepare `data/` and `codex/` as described in the VPS guide, then run these
-commands from the repository directory. [VPS setup](VPS_SETUP.md#3-set-linux-permissions-and-credentials)
+commands from the repository directory. [VPS setup](VPS_SETUP.md#2-set-linux-permissions-and-credentials)
 
 ```sh
 cp .env.example .env.vps
@@ -58,9 +77,7 @@ docker compose up -d
 docker compose logs -f prober
 ```
 
-Compose mounts the adjacent `data`, `codex`, and `zen-profile` folders.
-With dashboard-token authentication, Docker can create an empty `zen-profile`
-folder and the bot does not read it.
+Compose mounts the adjacent `data/` and `codex/` folders.
 
 `--test-telegram` needs only the Telegram configuration and sends a test message
 without contacting AgentRouter. `--once` performs one full model cycle after
@@ -89,9 +106,8 @@ $env:STATE_PATH = "$PWD\data\state.json"
 agentrouter-prober
 ```
 
-Direct execution reads environment variables from the shell. In Zen mode,
-Windows discovers the profile through `%APPDATA%\zen\profiles.ini` when
-`ZEN_PROFILE_PATH` is unset. Without `CODEX_CONFIG_PATH`, the config path is
+Direct execution reads environment variables from the shell. Without
+`CODEX_CONFIG_PATH`, the config path is
 `CODEX_HOME/config.toml` when `CODEX_HOME` is set, otherwise
 `~/.codex/config.toml`.
 
@@ -171,11 +187,9 @@ corrupt registration produces an error.
 | `AGENTROUTER_BASE_URL` | `https://agentrouter.org` | Status and model API host |
 | `TELEGRAM_CHAT_ID` | empty | Explicit destination; otherwise register via Start |
 | `TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | Telegram API host |
-| `ZEN_PROFILE_PATH` | Windows discovery | Zen profile; Compose sets `/zen-profile` |
 | `CODEX_CONFIG_PATH` | Codex home config | Codex TOML; Compose sets `/codex/config.toml` |
-| `AGENTROUTER_DASHBOARD_TOKEN` | empty | Dashboard access token for balance and model discovery |
-| `AGENTROUTER_SESSION_COOKIE` | empty | Explicit session for cookie authentication |
-| `AGENTROUTER_USER_ID` | empty | Positive account ID paired with the dashboard token or explicit cookie |
+| `AGENTROUTER_DASHBOARD_TOKEN` | required | Dashboard access token for balance and model discovery |
+| `AGENTROUTER_USER_ID` | required | Positive account ID paired with the dashboard token |
 | `POLL_SECONDS` | `900` | Interval between full probe cycles |
 | `PROBE_MAX_OUTPUT_TOKENS` | `32` | Output-token limit for each greeting |
 | `PROBE_REASONING_EFFORT` | `low` | `minimal`, `low`, `medium`, or `high` for Responses |
@@ -200,5 +214,5 @@ pip install -e ".[test]"
 pytest tests/
 ```
 
-The tests use mock HTTP transports and synthetic Zen/Codex files. They do not
-send Telegram messages or make live model requests.
+The tests use mock HTTP transports and synthetic Codex configurations to run
+offline.

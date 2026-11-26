@@ -10,7 +10,6 @@ from typing import Any
 
 import httpx
 
-from .browser_session import AgentRouterSession, BrowserSessionError, ZenSessionLoader
 from .config import Settings, TelegramSettings
 from .state import utc_now
 
@@ -195,7 +194,6 @@ class AgentRouterClient:
         self,
         settings: Settings,
         http_client: httpx.AsyncClient | None = None,
-        session_loader: ZenSessionLoader | None = None,
     ):
         self.settings = settings
         self._owns_client = http_client is None
@@ -207,76 +205,48 @@ class AgentRouterClient:
                 "originator": "codex_cli_rs",
             },
         )
-        self.session_loader = session_loader
         self._quota_display_cache: tuple[float, bool] | None = None
-        if (
-            self.session_loader is None
-            and settings.agentrouter_dashboard_token is None
-            and settings.agentrouter_session_cookie is None
-            and settings.zen_profile_path is not None
-        ):
-            self.session_loader = ZenSessionLoader(
-                settings.zen_profile_path, settings.agentrouter_base_url
-            )
 
     async def close(self) -> None:
         if self._owns_client:
             await self.http.aclose()
 
-    async def _dashboard_session(self) -> AgentRouterSession:
-        if (
-            self.settings.agentrouter_session_cookie is not None
-            and self.settings.agentrouter_user_id is not None
-        ):
-            return AgentRouterSession(
-                self.settings.agentrouter_session_cookie,
-                self.settings.agentrouter_user_id,
-            )
-        if self.session_loader is None:
-            raise AuthenticationError("No AgentRouter browser session source is configured")
-        try:
-            return await asyncio.to_thread(self.session_loader.load)
-        except BrowserSessionError as exc:
-            raise AuthenticationError(str(exc)) from exc
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        json: dict[str, Any] | None = None,
+    ) -> httpx.Response:
+        request = self.http.build_request(method, url, headers=headers, json=json)
+        # HTTPX can attach cookies from earlier responses to new requests.
+        request.headers.pop("Cookie", None)
+        return await self.http.send(request, follow_redirects=False)
 
     async def _dashboard_payload(
         self, path: str, *, referer: str, label: str
     ) -> dict[str, Any]:
         token = self.settings.agentrouter_dashboard_token
-        if token is not None:
-            user_id = self.settings.agentrouter_user_id
-            if user_id is None:
-                raise AuthenticationError(
-                    "The AgentRouter dashboard token requires a user ID"
-                )
-            auth_headers = {"Authorization": f"Bearer {token}"}
-            auth_error = (
-                "AgentRouter rejected dashboard authentication. Check "
-                "AGENTROUTER_DASHBOARD_TOKEN and AGENTROUTER_USER_ID."
-            )
-            verification_help = "check AgentRouter access from this host"
-        else:
-            session = await self._dashboard_session()
-            user_id = session.user_id
-            auth_headers = {"Cookie": f"session={session.cookie}"}
-            auth_error = "AgentRouter rejected the Zen login session; log in again in Zen"
-            verification_help = "refresh the AgentRouter console in Zen"
+        auth_error = (
+            "AgentRouter rejected dashboard authentication. Check "
+            "AGENTROUTER_DASHBOARD_TOKEN and AGENTROUTER_USER_ID."
+        )
         url = f"{self.settings.agentrouter_base_url}{path}"
         try:
-            response = await self.http.get(
+            response = await self._request(
+                "GET",
                 url,
                 headers={
-                    **auth_headers,
-                    "New-Api-User": str(user_id),
+                    "Authorization": f"Bearer {token}",
+                    "New-Api-User": str(self.settings.agentrouter_user_id),
                     "Accept": "application/json, text/plain, */*",
                     "Cache-Control": "no-store",
                     "Referer": referer,
                 },
             )
         except httpx.RequestError as exc:
-            detail = str(exc)
-            if token is not None:
-                detail = detail.replace(token, "[redacted]")
+            detail = str(exc).replace(token, "[redacted]")
             raise TransientClientError(f"{label} request failed: {detail}") from exc
 
         if response.status_code in {401, 403}:
@@ -291,7 +261,7 @@ class AgentRouterClient:
         if "json" not in content_type and response.text.lstrip().startswith("<"):
             raise AuthenticationError(
                 f"AgentRouter returned browser verification instead of {label.lower()}; "
-                f"{verification_help}"
+                "check AgentRouter access from this host"
             )
         try:
             payload = response.json()
@@ -300,17 +270,16 @@ class AgentRouterClient:
         if not isinstance(payload, dict) or payload.get("success") is not True:
             message = _message(payload, f"{label} request was unsuccessful")
             if _looks_like_auth_error(message):
-                raise AuthenticationError(auth_error if token is not None else message)
-            if token is not None:
-                message = message.replace(token, "[redacted]")
-            raise ProtocolError(message)
+                raise AuthenticationError(auth_error)
+            raise ProtocolError(message.replace(token, "[redacted]"))
         return payload
 
     async def _quota_display_settings(self) -> tuple[float, bool]:
         if self._quota_display_cache is not None:
             return self._quota_display_cache
         try:
-            response = await self.http.get(
+            response = await self._request(
+                "GET",
                 f"{self.settings.agentrouter_base_url}/api/status",
                 headers={
                     "Accept": "application/json, text/plain, */*",
@@ -472,7 +441,7 @@ class AgentRouterClient:
 
         started = time.perf_counter()
         try:
-            response = await self.http.post(url, headers=headers, json=body)
+            response = await self._request("POST", url, headers=headers, json=body)
         except httpx.RequestError as exc:
             raise TransientClientError(
                 f"Probe for {observation.name} failed: {exc}"
