@@ -37,13 +37,14 @@ def make_settings(directory: Path) -> Settings:
     )
 
 
-def message(text, user_id=42, chat_id=42, chat_type="private", is_bot=False):
+def message(text, user_id=42, chat_id=42, chat_type="private", is_bot=False, **message_fields):
     return {
         "update_id": 1,
         "message": {
             "text": text,
             "chat": {"id": chat_id, "type": chat_type},
             "from": {"id": user_id, "is_bot": is_bot},
+            **message_fields,
         },
     }
 
@@ -395,6 +396,21 @@ def test_other_users_cannot_probe_or_change_schedule(state_directory):
     assert agent.status_calls == 0
     assert commands.prober.poll_seconds == 900
     assert telegram.sent == []
+
+
+def test_commands_ignore_attachments_and_accept_text_replies(state_directory):
+    _, agent, telegram, commands = setup(state_directory)
+    photo = {"photo": [{"file_id": "photo-id"}]}
+
+    async def run():
+        await commands.handle_update(message(None, caption="/probe", **photo))
+        await commands.handle_update(message("/probe", document={"file_id": "document-id"}))
+        assert telegram.sent == []
+        await commands.handle_update(message("/balance", reply_to_message=photo))
+
+    asyncio.run(run())
+    assert agent.status_calls == 0
+    assert agent.account_calls == 1
 
 
 def test_schedule_describes_exact_dynamic_policy(state_directory):

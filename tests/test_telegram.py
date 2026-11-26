@@ -33,13 +33,14 @@ def identity(bot_id=123):
     return ok({"id": bot_id, "is_bot": True, "username": "prober_bot"})
 
 
-def update(update_id, user_id=42, text="/start", chat_type="private", is_bot=False):
+def update(update_id, user_id=42, text="/start", chat_type="private", is_bot=False, **message_fields):
     return {
         "update_id": update_id,
         "message": {
             "text": text,
             "chat": {"id": user_id, "type": chat_type},
             "from": {"id": user_id, "is_bot": is_bot},
+            **message_fields,
         },
     }
 
@@ -86,6 +87,8 @@ def test_first_private_start_wins_and_survives_restart_and_token_rotation(state_
         update(5, text="/start@another_bot"),
         {"update_id": 6, "edited_message": update(6)["message"]},
         update(7, text="/start@"),
+        update(8, user_id=98, text=None, photo=[{"file_id": "photo-id"}], caption="/start"),
+        update(9, user_id=99, document={"file_id": "document-id"}),
         update(10, 42, text="/start@PROBER_BOT payload"),
     ]
 

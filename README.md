@@ -13,35 +13,81 @@ requests run every cycle, including for models already confirmed available.
 The watched list comes from model-status; documentation and pricing lists do
 not determine which models are probed.
 
-## Credentials and local files
+## AgentRouter credentials
 
-Set `TELEGRAM_BOT_TOKEN` to the bot token created through Telegram's
-`@BotFather`. You can leave the AgentRouter credentials blank for setup in
-Telegram or prefill them in the environment.
+Both setup methods require `TELEGRAM_BOT_TOKEN`, which you get from Telegram's
+`@BotFather`. It lets the bot receive commands and send replies and alerts.
 
-- `AGENTROUTER_API_KEY` is the model key (`sk-...`) used for probes.
-  `CODEX_GATEWAY_API_KEY` is also accepted as a fallback.
-- `AGENTROUTER_USER_ID` is your numeric AgentRouter account ID.
+- `AGENTROUTER_API_KEY` is the model key (`sk-...`). It authorizes the small
+  requests the bot sends to check whether each model responds.
 - `AGENTROUTER_DASHBOARD_TOKEN` is the raw system access token generated in the
-  dashboard for that account.
+  AgentRouter dashboard. It lets the bot discover which models to probe and
+  read your balance, API key quotas, and usage logs for reports and alerts.
+- `AGENTROUTER_USER_ID` is the numeric ID of the account that generated the
+  dashboard token. AgentRouter checks the two together on dashboard requests.
 
-Leave `TELEGRAM_CHAT_ID` blank or omit it. The first person who sends `/start`
-in the bot's private chat becomes its saved recipient. An explicitly configured
-chat ID skips registration.
+### Find your account ID
 
-Choose any AgentRouter feature, such as **Status** or **Balance**, to start
-setup in the registered private chat. The bot asks for missing values one at a
-time and attempts to delete credential messages. It checks the model key with
-`/v1/models` and the dashboard token and account ID together with
-`/api/user/self`. If AgentRouter rejects a credential, the bot asks for that
-key or dashboard pair again. **Help** and the main menu work during setup.
-Probes, monitoring, and alerts start after all three values pass and are saved.
+Open **Personal Settings** and copy the digits next to **ID** on your profile
+card. [AgentRouter console](https://agentrouter.org/console)
+
+![AgentRouter console with Personal Settings selected and the account ID circled](src/agentrouter_prober/assets/agentrouter-account-id.png)
+
+### Generate a dashboard token
+
+Open **Personal Settings** → **Security Settings**. Under **System Access
+Token**, select **Generate Token** and copy the raw token for
+`AGENTROUTER_DASHBOARD_TOKEN`. [AgentRouter console](https://agentrouter.org/console)
+
+![AgentRouter Security Settings showing the Generate Token button for the System Access Token](src/agentrouter_prober/assets/agentrouter-dashboard-token.png)
+
+### Enter credentials in Telegram
+
+Leave the AgentRouter values blank in the repository’s `.env` and start the
+bot. If `TELEGRAM_CHAT_ID` is blank, the first person to send `/start` in the
+bot’s private chat becomes its saved recipient. A configured chat ID skips
+registration.
+
+In the registered private chat, tap **Status**, **Balance**, or any other
+AgentRouter feature. The bot prompts for missing credentials one at a time,
+in the order shown below. You can prefill any of the three in `.env` and enter
+the rest in Telegram. Send commands and credentials as text. The bot ignores
+incoming files, media, and captions, and attempts to delete credential messages
+after receiving them.
+
+1. API key for probing models (`sk-...`)
+2. Numeric AgentRouter account ID
+3. Raw dashboard access token for that account
+
+### Prefill credentials in `.env`
+
+For Docker Compose, copy `.env.example` to `.env` in the repository and fill in
+these values along with `TELEGRAM_BOT_TOKEN`. When running directly, set the
+same variables in your shell. `CODEX_GATEWAY_API_KEY` is accepted as a fallback
+for `AGENTROUTER_API_KEY`.
+
+```dotenv
+AGENTROUTER_API_KEY=sk-your-model-key
+AGENTROUTER_USER_ID=12345
+AGENTROUTER_DASHBOARD_TOKEN=your-dashboard-access-token
+```
+
+With all three values present, the bot checks them on startup and skips the
+prompts if they pass. Use prefilled or saved credentials when the Telegram
+destination is a group or channel. Interactive setup takes place in a private
+chat.
+
+### Validation and storage
+
+The bot checks the model key with `/v1/models` and the dashboard token and
+account ID together with `/api/user/self`. If AgentRouter rejects a credential,
+the bot asks for the model key or the dashboard pair again. **Help** and the
+main menu work during setup. Probes, monitoring, and alerts start after all
+three values pass and are saved.
 
 The bot saves the verified set to `credentials/.env` beside `STATE_PATH`, at
 `/data/credentials/.env` in Docker. Saved credentials take precedence over
-environment values and are checked again on startup. An explicitly configured
-group or channel needs prefilled or saved credentials for alerts. Setup takes
-place in a private chat.
+environment values and are checked again on startup.
 
 ## Start with Docker
 

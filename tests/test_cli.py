@@ -3,6 +3,9 @@ import json
 import os
 import signal
 import stat
+from email.parser import BytesParser
+from email.policy import default
+from importlib.resources import files
 
 import httpx
 import pytest
@@ -154,22 +157,30 @@ def test_bot_collects_missing_credentials_and_keeps_valid_values_when_a_check_fa
         monkeypatch.delenv(name, raising=False)
     env_path = configured_env.parent / "credentials" / ".env"
     sent, deleted, checks = [], [], []
+    assets = files("agentrouter_prober").joinpath("assets")
+    id_photo = "agentrouter-account-id.png"
+    token_photo = "agentrouter-dashboard-token.png"
+    photo_captions = {id_photo: [], token_photo: []}
     telegram = telegram_response(sent)
     probed = asyncio.Event()
 
-    def message(update_id, text, user_id=42):
+    def message(update_id, text, user_id=42, **message_fields):
         return {"update_id": update_id, "message": {
             "message_id": update_id, "text": text,
             "chat": {"id": user_id, "type": "private"},
             "from": {"id": user_id, "is_bot": False},
+            **message_fields,
         }}
 
     updates = [
         message(1, "/start"), message(2, "/help"), message(3, "/balance"),
-        message(4, "sk-other-user", user_id=99), message(5, "sk-test"),
-        message(6, "wrong-id"), message(7, "60923"), message(8, "dashboard-invalid"),
-        message(9, "/api_keys"), message(10, "60923"), message(11, "dashboard-token"),
-        message(12, "/balance"),
+        message(4, "sk-other-user", user_id=99),
+        message(5, None, photo=[{"file_id": "photo-id"}], caption="sk-caption"),
+        message(6, "sk-with-document", document={"file_id": "document-id"}),
+        message(7, "sk-test"), message(8, "wrong-id"),
+        message(9, "60923", reply_to_message={"photo": [{"file_id": "guide-id"}]}),
+        message(10, "dashboard-invalid"), message(11, "/api_keys"),
+        message(12, "60923"), message(13, "dashboard-token"), message(14, "/balance"),
     ]
     acknowledged = 0
 
@@ -192,9 +203,26 @@ def test_bot_collects_missing_credentials_and_keeps_valid_values_when_a_check_fa
                 assert data["chat_id"] == "42"
                 deleted.append(data["message_id"])
                 return httpx.Response(200, json={"ok": True, "result": True})
+            if method == "sendPhoto":
+                headers = f"Content-Type: {request.headers['content-type']}\r\nMIME-Version: 1.0\r\n\r\n"
+                form = BytesParser(policy=default).parsebytes(headers.encode() + request.content)
+                parts = {part.get_param("name", header="content-disposition"): part for part in form.iter_parts()}
+                assert parts["chat_id"].get_payload(decode=True) == b"42"
+                assert parts["photo"].get_content_type() == "image/png"
+                filename = parts["photo"].get_filename()
+                assert filename in photo_captions
+                assert parts["photo"].get_payload(decode=True) == assets.joinpath(filename).read_bytes()
+                markup = json.loads(parts["reply_markup"].get_payload(decode=True))
+                assert markup["keyboard"] == [[{"text": "↩️ Back"}]]
+                caption = parts["caption"].get_payload(decode=True).decode()
+                captions = photo_captions[filename]
+                captions.append(caption)
+                if "must be an integer" in caption or (filename == token_photo and len(captions) == 2):
+                    return httpx.Response(400, json={"ok": False})
+                return httpx.Response(200, json={"ok": True, "result": {"message_id": 42}})
             return telegram(request)
         if path == "/v1/models":
-            assert deleted[-1] in {8, 11}
+            assert deleted[-1] in {10, 13}
             assert request.headers["authorization"] == "Bearer sk-test"
             checks.append(path)
             return httpx.Response(200, json={"data": [{"id": "gpt-6-astra"}]})
@@ -224,14 +252,24 @@ def test_bot_collects_missing_credentials_and_keeps_valid_values_when_a_check_fa
     asyncio.run(asyncio.wait_for(cli._run(Settings.from_env(), False), timeout=2))
     texts = "\n".join(item["text"] for item in sent)
     assert TELEGRAM_HELP in texts
-    assert texts.count("Send your model API key") == 1
+    assert texts.count("Send your AgentRouter API key for probing models (sk-…).") == 1
     assert "AGENTROUTER_USER_ID must be an integer" in texts
-    assert "AgentRouter rejected the dashboard token and account ID pair" in texts
+    assert "Personal Settings" in texts
+    id_captions = photo_captions[id_photo]
+    assert len(id_captions) == 4 and all("digits next to ID" in caption for caption in id_captions)
+    assert any("AgentRouter rejected the dashboard token and account ID pair" in caption for caption in id_captions)
+    token_captions = photo_captions[token_photo]
+    assert len(token_captions) == 2
+    for prompt in [*token_captions, texts]:
+        assert "Personal Settings → Security Settings" in prompt
+        assert "Generate Token under System Access Token" in prompt
+        assert "https://agentrouter.org/console" in prompt
     assert "credentials verified and saved" in texts
     assert "💰 $1.00 available" in texts
-    assert deleted == [5, 6, 7, 8, 10, 11]
+    assert deleted == [7, 8, 9, 10, 12, 13]
     assert checks == ["/v1/models", "/v1/models"] and probed.is_set()
-    assert all(secret not in texts + caplog.text for secret in ("sk-test", "dashboard-token", "dashboard-invalid"))
+    all_output = "\n".join([texts, *id_captions, *token_captions, caplog.text])
+    assert all(secret not in all_output for secret in ("sk-test", "dashboard-token", "dashboard-invalid"))
     if os.name == "posix":
         assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
     monkeypatch.setenv("AGENTROUTER_DASHBOARD_TOKEN", "dashboard-invalid")

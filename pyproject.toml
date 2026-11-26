@@ -23,6 +23,9 @@ agentrouter-prober = "agentrouter_prober.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+agentrouter_prober = ["assets/agentrouter-account-id.png", "assets/agentrouter-dashboard-token.png"]
+
 [tool.pytest.ini_options]
 addopts = "-q"
 pythonpath = ["src"]

@@ -16,6 +16,12 @@ from .messages import TELEGRAM_MENU
 
 LOGGER = logging.getLogger(__name__)
 CONNECTED_MESSAGE = "Connected. Choose an action to get started."
+NON_TEXT_MESSAGE_FIELDS = {
+    "animation", "audio", "caption", "caption_entities", "checklist", "contact",
+    "dice", "document", "game", "live_photo", "location", "media_group_id",
+    "paid_media", "photo", "poll", "sticker", "story", "venue", "video", "video_note",
+    "voice",
+}
 T = TypeVar("T")
 
 
@@ -100,11 +106,19 @@ async def _retry(operation: Callable[[], Awaitable[T]], action: str = "Telegram 
             delay = min(delay * 2, 30)
 
 
+def _plain_message_text(message: dict[str, Any]) -> str | None:
+    text = message.get("text")
+    if not isinstance(text, str) or not NON_TEXT_MESSAGE_FIELDS.isdisjoint(message):
+        return None
+    return text
+
+
 def _private_start(update: dict[str, Any], bot: TelegramBot) -> int | None:
     message = update.get("message")
     if not isinstance(message, dict):
         return None
-    chat, sender, text = message.get("chat"), message.get("from"), message.get("text")
+    chat, sender = message.get("chat"), message.get("from")
+    text = _plain_message_text(message)
     if (
         not isinstance(chat, dict)
         or chat.get("type") != "private"
@@ -114,7 +128,7 @@ def _private_start(update: dict[str, Any], bot: TelegramBot) -> int | None:
         or sender["id"] <= 0
         or type(chat.get("id")) is not int
         or chat["id"] != sender["id"]
-        or not isinstance(text, str)
+        or text is None
         or not text.startswith("/")
     ):
         return None

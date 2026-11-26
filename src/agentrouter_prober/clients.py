@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import time
 from collections import Counter
@@ -723,17 +724,25 @@ class TelegramClient:
             await self.http.aclose()
 
     async def _request(
-        self, method: str, data: dict[str, Any], *, poll_seconds: int = 0
+        self,
+        method: str,
+        data: dict[str, Any],
+        *,
+        poll_seconds: int = 0,
+        photo: tuple[str, bytes] | None = None,
     ) -> Any:
         url = (
             f"{self.settings.api_base_url}/bot"
             f"{self.settings.bot_token}/{method}"
         )
+        body: dict[str, Any] = {"json": data}
+        if photo is not None:
+            body = {"data": data, "files": {"photo": (*photo, "image/png")}}
         try:
             response = await self.http.post(
                 url,
-                json=data,
                 timeout=max(self.timeout_seconds, poll_seconds + 5),
+                **body,
             )
         except httpx.RequestError:
             raise TransientClientError("Telegram request failed") from None
@@ -833,6 +842,22 @@ class TelegramClient:
     async def send(
         self, text: str, *, reply_markup: dict[str, Any] | None = None
     ) -> Any:
+        data: dict[str, Any] = {"text": text, "disable_web_page_preview": True}
+        if reply_markup is not None:
+            data["reply_markup"] = reply_markup
+        return await self._send("sendMessage", data)
+
+    async def send_photo(
+        self, filename: str, png: bytes, *, caption: str, reply_markup: dict[str, Any] | None = None
+    ) -> Any:
+        data = {"caption": caption}
+        if reply_markup is not None:
+            data["reply_markup"] = json.dumps(reply_markup)
+        return await self._send("sendPhoto", data, photo=(filename, png))
+
+    async def _send(
+        self, method: str, data: dict[str, Any], *, photo: tuple[str, bytes] | None = None
+    ) -> Any:
         if not self.chat_id:
             raise ProtocolError("Telegram chat is not registered yet")
         async with self._send_lock:
@@ -843,15 +868,8 @@ class TelegramClient:
                         "Telegram rate limit is still active", math.ceil(remaining)
                     )
             self.send_retry_at = None
-            data: dict[str, Any] = {
-                "chat_id": self.chat_id,
-                "text": text,
-                "disable_web_page_preview": True,
-            }
-            if reply_markup is not None:
-                data["reply_markup"] = reply_markup
             try:
-                return await self._request("sendMessage", data)
+                return await self._request(method, {"chat_id": self.chat_id, **data}, photo=photo)
             except TransientClientError as exc:
                 if exc.retry_after is not None:
                     self.send_retry_at = utc_now() + timedelta(seconds=exc.retry_after)

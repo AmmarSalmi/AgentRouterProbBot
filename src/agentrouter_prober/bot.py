@@ -4,10 +4,11 @@ import asyncio
 import logging
 import re
 from decimal import Decimal
+from importlib.resources import files
 from typing import Any
 
 from .app import Prober
-from .clients import ClientError, TelegramClient, TransientClientError
+from .clients import ClientError, ProtocolError, TelegramClient, TransientClientError
 from .config import ACCOUNT_ID, DASHBOARD_TOKEN, MODEL_KEY, ConfigurationError
 from .key_messages import (
     DAY_SECONDS,
@@ -36,7 +37,7 @@ from .messages import (
 )
 from .setup import AgentRouterSetup
 from .state import CreditAlertKind, KeyAlertKind, utc_now
-from .telegram import _retry
+from .telegram import _plain_message_text, _retry
 
 
 LOGGER = logging.getLogger(__name__)
@@ -60,10 +61,23 @@ KEY_ACTIONS = {
 }
 WEEKLY_ACTIONS = {"weekly digest", "view weekly report", "enable weekly digest", "disable weekly digest"}
 
+AGENTROUTER_CONSOLE_URL = "https://agentrouter.org/console"
 SETUP_PROMPTS = {
-    MODEL_KEY: "Send your model API key (sk-…).",
-    ACCOUNT_ID: "Send your numeric AgentRouter account ID.",
-    DASHBOARD_TOKEN: "Send your raw AgentRouter dashboard access token.",
+    MODEL_KEY: "Send your AgentRouter API key for probing models (sk-…).",
+    ACCOUNT_ID: (
+        "Open Personal Settings in the AgentRouter console. "
+        "Send the digits next to ID on your profile card.\n\n"
+        f"{AGENTROUTER_CONSOLE_URL}"
+    ),
+    DASHBOARD_TOKEN: (
+        "Open Personal Settings → Security Settings in the AgentRouter console. "
+        "Select Generate Token under System Access Token, then send the raw token here.\n\n"
+        f"{AGENTROUTER_CONSOLE_URL}"
+    ),
+}
+SETUP_SCREENSHOTS = {
+    ACCOUNT_ID: "agentrouter-account-id.png",
+    DASHBOARD_TOKEN: "agentrouter-dashboard-token.png",
 }
 SETUP_MENU = telegram_keyboard(("Back",))
 
@@ -131,7 +145,8 @@ class TelegramCommands:
         message = update.get("message")
         if self.owner_id is None or not isinstance(message, dict):
             return None
-        chat, sender, text = message.get("chat"), message.get("from"), message.get("text")
+        chat, sender = message.get("chat"), message.get("from")
+        text = _plain_message_text(message)
         if (
             not isinstance(chat, dict)
             or chat.get("type") != "private"
@@ -141,7 +156,7 @@ class TelegramCommands:
             or sender.get("is_bot") is not False
             or type(sender.get("id")) is not int
             or sender["id"] != self.owner_id
-            or not isinstance(text, str)
+            or text is None
             or not text.strip()
         ):
             return None
@@ -238,7 +253,21 @@ class TelegramCommands:
         if details:
             lines.extend((details, ""))
         lines.append(prompt)
-        await self._reply("\n".join(lines), reply_markup=SETUP_MENU if field is not None else TELEGRAM_MENU)
+        text = "\n".join(lines)
+        screenshot = SETUP_SCREENSHOTS.get(field) if field is not None else None
+        if screenshot is not None:
+            try:
+                photo = files("agentrouter_prober").joinpath("assets", screenshot).read_bytes()
+                await _retry(
+                    lambda: self.telegram.send_photo(
+                        screenshot, photo, caption=text, reply_markup=SETUP_MENU
+                    ),
+                    "Telegram credential prompt photo",
+                )
+                return
+            except (OSError, ProtocolError):
+                LOGGER.warning("Could not send the AgentRouter setup screenshot for %s", field)
+        await self._reply(text, reply_markup=SETUP_MENU if field is not None else TELEGRAM_MENU)
 
     async def _submit_credential(self, text: str, message_id: object) -> None:
         assert self._setup is not None
