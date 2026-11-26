@@ -16,6 +16,7 @@ from .state import utc_now
 
 
 TELEGRAM_USER_AGENT = "AgentRouterAvailabilityProber/2.0"
+DEFAULT_QUOTA_PER_UNIT = 500_000
 
 
 class ClientError(RuntimeError):
@@ -72,6 +73,16 @@ class ModelProbe:
     api: str
     latency_ms: int
     reply: str | None = None
+
+
+@dataclass(frozen=True)
+class AccountUsage:
+    quota: int
+    used_quota: int
+    request_count: int
+    group: str
+    quota_per_unit: float
+    display_in_currency: bool
 
 
 def _message(payload: Any, fallback: str = "") -> str:
@@ -197,8 +208,10 @@ class AgentRouterClient:
             },
         )
         self.session_loader = session_loader
+        self._quota_display_cache: tuple[float, bool] | None = None
         if (
             self.session_loader is None
+            and settings.agentrouter_dashboard_token is None
             and settings.agentrouter_session_cookie is None
             and settings.zen_profile_path is not None
         ):
@@ -226,52 +239,143 @@ class AgentRouterClient:
         except BrowserSessionError as exc:
             raise AuthenticationError(str(exc)) from exc
 
-    async def fetch_model_status(self) -> dict[str, ModelObservation]:
-        session = await self._dashboard_session()
-        url = f"{self.settings.agentrouter_base_url}/api/user/model-status"
+    async def _dashboard_payload(
+        self, path: str, *, referer: str, label: str
+    ) -> dict[str, Any]:
+        token = self.settings.agentrouter_dashboard_token
+        if token is not None:
+            user_id = self.settings.agentrouter_user_id
+            if user_id is None:
+                raise AuthenticationError(
+                    "The AgentRouter dashboard token requires a user ID"
+                )
+            auth_headers = {"Authorization": f"Bearer {token}"}
+            auth_error = (
+                "AgentRouter rejected dashboard authentication. Check "
+                "AGENTROUTER_DASHBOARD_TOKEN and AGENTROUTER_USER_ID."
+            )
+            verification_help = "check AgentRouter access from this host"
+        else:
+            session = await self._dashboard_session()
+            user_id = session.user_id
+            auth_headers = {"Cookie": f"session={session.cookie}"}
+            auth_error = "AgentRouter rejected the Zen login session; log in again in Zen"
+            verification_help = "refresh the AgentRouter console in Zen"
+        url = f"{self.settings.agentrouter_base_url}{path}"
         try:
             response = await self.http.get(
                 url,
                 headers={
-                    "Cookie": f"session={session.cookie}",
-                    "New-Api-User": str(session.user_id),
+                    **auth_headers,
+                    "New-Api-User": str(user_id),
                     "Accept": "application/json, text/plain, */*",
                     "Cache-Control": "no-store",
-                    "Referer": (
-                        f"{self.settings.agentrouter_base_url}/console/model-status"
-                    ),
+                    "Referer": referer,
                 },
             )
         except httpx.RequestError as exc:
-            raise TransientClientError(f"Model-status request failed: {exc}") from exc
+            detail = str(exc)
+            if token is not None:
+                detail = detail.replace(token, "[redacted]")
+            raise TransientClientError(f"{label} request failed: {detail}") from exc
 
         if response.status_code in {401, 403}:
-            raise AuthenticationError(
-                "AgentRouter rejected the Zen login session; log in again in Zen"
-            )
+            raise AuthenticationError(auth_error)
         if response.status_code == 429 or response.status_code >= 500:
-            raise TransientClientError(
-                f"Model-status returned HTTP {response.status_code}"
-            )
+            raise TransientClientError(f"{label} returned HTTP {response.status_code}")
         if not response.is_success:
             raise ProtocolError(
-                f"Model-status returned unexpected HTTP {response.status_code}"
+                f"{label} returned unexpected HTTP {response.status_code}"
             )
         content_type = response.headers.get("content-type", "").lower()
         if "json" not in content_type and response.text.lstrip().startswith("<"):
             raise AuthenticationError(
-                "AgentRouter returned browser verification instead of model status; "
-                "refresh the model-status page in Zen"
+                f"AgentRouter returned browser verification instead of {label.lower()}; "
+                f"{verification_help}"
             )
         try:
             payload = response.json()
         except ValueError as exc:
-            raise ProtocolError("Model-status returned invalid JSON") from exc
+            raise ProtocolError(f"{label} returned invalid JSON") from exc
         if not isinstance(payload, dict) or payload.get("success") is not True:
-            message = _message(payload, "Model-status request was unsuccessful")
+            message = _message(payload, f"{label} request was unsuccessful")
             if _looks_like_auth_error(message):
-                raise AuthenticationError(message)
+                raise AuthenticationError(auth_error if token is not None else message)
+            if token is not None:
+                message = message.replace(token, "[redacted]")
             raise ProtocolError(message)
+        return payload
+
+    async def _quota_display_settings(self) -> tuple[float, bool]:
+        if self._quota_display_cache is not None:
+            return self._quota_display_cache
+        try:
+            response = await self.http.get(
+                f"{self.settings.agentrouter_base_url}/api/status",
+                headers={
+                    "Accept": "application/json, text/plain, */*",
+                    "Cache-Control": "no-store",
+                },
+            )
+            payload = response.json() if response.is_success else None
+            data = payload.get("data") if isinstance(payload, dict) else None
+            quota_per_unit = data.get("quota_per_unit") if isinstance(data, dict) else None
+            display_in_currency = (
+                data.get("display_in_currency") if isinstance(data, dict) else None
+            )
+            if (
+                type(quota_per_unit) in (int, float)
+                and math.isfinite(quota_per_unit)
+                and quota_per_unit > 0
+            ):
+                self._quota_display_cache = (
+                    float(quota_per_unit),
+                    display_in_currency is not False,
+                )
+        except (httpx.RequestError, ValueError):
+            pass
+        if self._quota_display_cache is None:
+            self._quota_display_cache = (float(DEFAULT_QUOTA_PER_UNIT), True)
+        return self._quota_display_cache
+
+    async def fetch_account_usage(self) -> AccountUsage:
+        payload = await self._dashboard_payload(
+            "/api/user/self",
+            referer=f"{self.settings.agentrouter_base_url}/console",
+            label="Account details",
+        )
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise ProtocolError("Account response did not contain account data")
+        quota = data.get("quota")
+        used_quota = data.get("used_quota")
+        request_count = data.get("request_count", 0)
+        if (
+            type(quota) is not int
+            or type(used_quota) is not int
+            or type(request_count) is not int
+            or used_quota < 0
+            or request_count < 0
+        ):
+            raise ProtocolError("Account response did not contain valid usage data")
+        raw_group = data.get("group")
+        group = raw_group.strip() if isinstance(raw_group, str) else ""
+        quota_per_unit, display_in_currency = await self._quota_display_settings()
+        return AccountUsage(
+            quota=quota,
+            used_quota=used_quota,
+            request_count=request_count,
+            group=group,
+            quota_per_unit=quota_per_unit,
+            display_in_currency=display_in_currency,
+        )
+
+    async def fetch_model_status(self) -> dict[str, ModelObservation]:
+        payload = await self._dashboard_payload(
+            "/api/user/model-status",
+            referer=f"{self.settings.agentrouter_base_url}/console/model-status",
+            label="Model-status",
+        )
         data = payload.get("data")
         models = data.get("models") if isinstance(data, dict) else None
         if not isinstance(models, list):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import configparser
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -140,6 +140,7 @@ class Settings:
     codex_config_path: Path
     client_user_agent: str
     reasoning_effort: str = "low"
+    agentrouter_dashboard_token: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -149,17 +150,27 @@ class Settings:
                 "PROBE_REASONING_EFFORT must be minimal, low, medium, or high"
             )
 
-        session_cookie = os.getenv("AGENTROUTER_SESSION_COOKIE", "").strip() or None
+        dashboard_token = os.getenv("AGENTROUTER_DASHBOARD_TOKEN", "").strip() or None
         user_id = _optional_positive_int("AGENTROUTER_USER_ID")
-        zen_profile = _discover_zen_profile()
-        if bool(session_cookie) != bool(user_id):
-            raise ConfigurationError(
-                "AGENTROUTER_SESSION_COOKIE and AGENTROUTER_USER_ID must be set together"
-            )
-        if session_cookie is None and zen_profile is None:
-            raise ConfigurationError(
-                "ZEN_PROFILE_PATH is required unless an AgentRouter session cookie and user ID are provided"
-            )
+        session_cookie = None
+        zen_profile = None
+        if dashboard_token is not None:
+            if user_id is None:
+                raise ConfigurationError(
+                    "AGENTROUTER_DASHBOARD_TOKEN requires AGENTROUTER_USER_ID"
+                )
+        else:
+            session_cookie = os.getenv("AGENTROUTER_SESSION_COOKIE", "").strip() or None
+            if bool(session_cookie) != bool(user_id):
+                raise ConfigurationError(
+                    "AGENTROUTER_SESSION_COOKIE and AGENTROUTER_USER_ID must be set together"
+                )
+            zen_profile = _discover_zen_profile()
+            if session_cookie is None and zen_profile is None:
+                raise ConfigurationError(
+                    "Configure AGENTROUTER_DASHBOARD_TOKEN with AGENTROUTER_USER_ID, "
+                    "AGENTROUTER_SESSION_COOKIE with AGENTROUTER_USER_ID, or ZEN_PROFILE_PATH"
+                )
 
         return cls(
             agentrouter_base_url=_url(
@@ -186,4 +197,5 @@ class Settings:
                 "codex_cli_rs/0.171.0 (Windows 11; x86_64)",
             ).strip(),
             reasoning_effort=reasoning_effort,
+            agentrouter_dashboard_token=dashboard_token,
         )

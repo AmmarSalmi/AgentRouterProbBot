@@ -2,25 +2,35 @@ services:
   prober:
     build:
       context: .
+    user: "10001:10001"
     env_file:
-      - ${ENV_FILE:-.env}
+      - ${ENV_FILE:-.env.vps}
     environment:
       ZEN_PROFILE_PATH: /zen-profile
       CODEX_CONFIG_PATH: /codex/config.toml
+      STATE_PATH: /data/state.json
     restart: unless-stopped
     init: true
     read_only: true
     tmpfs:
       - /tmp:size=16m,mode=1777
     volumes:
-      - prober-data:/data
       - type: bind
-        source: ${ZEN_PROFILE_SOURCE}
+        source: ./data
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./zen-profile
         target: /zen-profile
         read_only: true
+        bind:
+          create_host_path: true
       - type: bind
-        source: ${CODEX_HOME_SOURCE}
+        source: ./codex
         target: /codex
+        bind:
+          create_host_path: false
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -31,6 +41,3 @@ services:
       options:
         max-size: 10m
         max-file: "3"
-
-volumes:
-  prober-data:

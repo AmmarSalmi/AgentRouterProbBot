@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from .clients import (
+    AccountUsage,
     AgentRouterClient,
     AuthenticationError,
     ModelObservation,
@@ -94,6 +95,9 @@ class Prober:
                 f"{model} is not Codex-compatible (Responses API is not advertised)"
             )
         return await asyncio.to_thread(self.codex.set_model, model)
+
+    async def account_usage(self) -> AccountUsage:
+        return await self.agentrouter.fetch_account_usage()
 
     async def status_snapshot(self) -> PersistentState:
         was_running = self._cycle_lock.locked()

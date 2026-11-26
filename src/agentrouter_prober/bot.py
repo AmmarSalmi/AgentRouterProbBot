@@ -5,11 +5,12 @@ import logging
 from typing import Any
 
 from .app import Prober
-from .clients import TransientClientError
+from .clients import ClientError, TransientClientError
 from .codex import CodexConfigError
 from .messages import (
     TELEGRAM_COMMANDS,
     TELEGRAM_MENU,
+    account_usage_message,
     probing_schedule_message,
     status_message,
     telegram_message_parts,
@@ -71,6 +72,8 @@ class TelegramCommands:
             return {
                 "/start": "menu",
                 "/status": "status",
+                "/balance": "balance",
+                "/usage": "balance",
                 "/probe_now": "probe",
                 "/probe": "probe",
                 "/set_model": "codex",
@@ -80,6 +83,9 @@ class TelegramCommands:
             }.get(command.lower())
         return {
             "status": "status",
+            "balance": "balance",
+            "balance & usage": "balance",
+            "usage": "balance",
             "probe now": "probe",
             "set codex model": "codex",
             "probing schedule": "schedule",
@@ -186,6 +192,14 @@ class TelegramCommands:
                 await self._reply("Checking every model listed on AgentRouter…")
             snapshot = await self.prober.status_snapshot()
             await self._reply(status_message(self.prober.settings, snapshot))
+        elif command == "balance":
+            await self._reply("Checking your AgentRouter balance…")
+            try:
+                usage = await self.prober.account_usage()
+            except ClientError as exc:
+                await self._reply(f"AgentRouter balance check failed: {exc}")
+            else:
+                await self._reply(account_usage_message(usage))
         elif command == "probe":
             await self._reply("Refreshing model-status and probing every listed model…")
             await self.prober.run_cycle()
@@ -196,7 +210,8 @@ class TelegramCommands:
             await self._reply(probing_schedule_message(self.prober.settings))
         elif command == "menu":
             await self._reply(
-                "Choose Status, Probe Now, Set Codex Model, or Probing Schedule below."
+                "Choose Status, Probe Now, Balance & Usage, Set Codex Model, "
+                "or Probing Schedule below."
             )
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:

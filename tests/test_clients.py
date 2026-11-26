@@ -1,10 +1,12 @@
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
 import pytest
 
 from agentrouter_prober.clients import (
+    AccountUsage,
     AgentRouterClient,
     AuthenticationError,
     ModelObservation,
@@ -93,6 +95,84 @@ def test_status_auth_failure_inside_http_200_is_recognized():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("token", [None, "dashboard-token"])
+def test_account_usage_reads_balance_and_consumption(token):
+    paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/status":
+            assert "authorization" not in request.headers
+            assert "cookie" not in request.headers
+            assert "new-api-user" not in request.headers
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "data": {
+                        "quota_per_unit": 500000,
+                        "display_in_currency": True,
+                    },
+                },
+            )
+        assert request.url.path == "/api/user/self"
+        assert request.headers["New-Api-User"] == "60923"
+        if token is None:
+            assert request.headers["Cookie"] == "session=browser-session"
+            assert "authorization" not in request.headers
+        else:
+            assert request.headers["Authorization"] == f"Bearer {token}"
+            assert "cookie" not in request.headers
+        return httpx.Response(
+            200,
+            json={
+                "success": True,
+                "data": {
+                    "quota": 6250000,
+                    "used_quota": 2500000,
+                    "request_count": 321,
+                    "group": "vip",
+                },
+            },
+        )
+
+    async def run():
+        config = replace(settings(), agentrouter_dashboard_token=token)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            usage = await AgentRouterClient(config, http).fetch_account_usage()
+            assert usage == AccountUsage(6250000, 2500000, 321, "vip", 500000.0, True)
+            assert paths == ["/api/user/self", "/api/status"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    "response,expected_message",
+    [
+        (httpx.Response(401), "AGENTROUTER_DASHBOARD_TOKEN and AGENTROUTER_USER_ID"),
+        (httpx.Response(403), "AGENTROUTER_DASHBOARD_TOKEN and AGENTROUTER_USER_ID"),
+        (
+            httpx.Response(200, json={"success": False, "message": "New-Api-User mismatch"}),
+            "AGENTROUTER_DASHBOARD_TOKEN and AGENTROUTER_USER_ID",
+        ),
+        (
+            httpx.Response(200, text="<html>Verify your browser</html>"),
+            "check AgentRouter access from this host",
+        ),
+    ],
+)
+def test_dashboard_token_auth_failures_give_token_mode_guidance(response, expected_message):
+    async def run():
+        config = replace(settings(), agentrouter_dashboard_token="dashboard-token")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: response)
+        ) as http:
+            with pytest.raises(AuthenticationError, match=expected_message):
+                await AgentRouterClient(config, http).fetch_model_status()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     "observation,path,auth_header,response",
     [
@@ -136,12 +216,16 @@ def test_probe_selects_api_advertised_by_model_status(
 ):
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == path
-        assert auth_header in request.headers
+        expected_key = "Bearer sk-test" if auth_header == "authorization" else "sk-test"
+        assert request.headers[auth_header] == expected_key
+        assert "cookie" not in request.headers
+        assert "new-api-user" not in request.headers
         return httpx.Response(200, json=response)
 
     async def run():
+        config = replace(settings(), agentrouter_dashboard_token="dashboard-token")
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-            result = await AgentRouterClient(settings(), http).probe_model(observation)
+            result = await AgentRouterClient(config, http).probe_model(observation)
             assert result.outcome is ProbeOutcome.AVAILABLE
             assert result.reply == "OK"
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -113,6 +114,13 @@ class ZenSessionLoader:
         port = f"+{parsed.port}" if parsed.port else ""
         self.storage_origin = f"{parsed.scheme}+++{self.host}{port}"
         self._cached: AgentRouterSession | None = None
+        self._cached_expires_at: float | None = None
+
+    def _usable_cached_session(self) -> AgentRouterSession | None:
+        if self._cached_expires_at is not None and self._cached_expires_at <= time.time():
+            self._cached = None
+            self._cached_expires_at = None
+        return self._cached
 
     def _user_id(self, origin_attributes: str) -> int | None:
         storage = (
@@ -124,7 +132,7 @@ class ZenSessionLoader:
             / "data.sqlite"
         )
         try:
-            with _sqlite_read_only(storage) as connection:
+            with closing(_sqlite_read_only(storage)) as connection:
                 row = connection.execute(
                     "select conversion_type, compression_type, value "
                     "from data where key = 'user'"
@@ -156,23 +164,24 @@ class ZenSessionLoader:
         return user_id if type(user_id) is int and user_id > 0 else None
 
     def load(self) -> AgentRouterSession:
+        cached = self._usable_cached_session()
         cookie_db = self.profile_path / "cookies.sqlite"
         try:
-            with _sqlite_read_only(cookie_db) as connection:
+            with closing(_sqlite_read_only(cookie_db)) as connection:
                 rows = connection.execute(
                     "select value, expiry, lastAccessed, originAttributes "
                     "from moz_cookies where host in (?, ?) and name = 'session'",
                     (self.host, f".{self.host}"),
                 ).fetchall()
         except FileNotFoundError as exc:
-            if self._cached is not None:
-                return self._cached
+            if cached is not None:
+                return cached
             raise BrowserSessionError(
                 f"Zen cookie database was not found in {self.profile_path}"
             ) from exc
         except (OSError, sqlite3.Error) as exc:
-            if self._cached is not None:
-                return self._cached
+            if cached is not None:
+                return cached
             raise BrowserSessionError("Zen cookie database could not be read") from exc
 
         now = time.time()
@@ -187,10 +196,13 @@ class ZenSessionLoader:
             if user_id is None:
                 continue
             self._cached = AgentRouterSession(cookie, user_id, attributes)
+            self._cached_expires_at = (
+                _expiry_seconds(expiry) if type(expiry) is int and expiry > 0 else None
+            )
             return self._cached
 
-        if self._cached is not None:
-            return self._cached
+        if cached is not None:
+            return cached
         raise BrowserSessionError(
             "No logged-in AgentRouter session matching Zen local storage was found; "
             "open AgentRouter in the configured Zen profile and log in"

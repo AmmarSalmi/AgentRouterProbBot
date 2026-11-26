@@ -1,4 +1,11 @@
 .env
+.env.*
+!.env.example
+!.env.vps.example
+exports/
+zen-profile/
+codex/
+data/
 AgentRouterProb-followup.md
 .pytest_cache/
 pytest-cache-files-*/

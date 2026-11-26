@@ -1,0 +1,43 @@
+services:
+  prober:
+    build:
+      context: .
+    user: "10001:10001"
+    env_file:
+      - ${ENV_FILE:-.env.vps}
+    environment:
+      ZEN_PROFILE_PATH: /zen-profile
+      CODEX_CONFIG_PATH: /codex/config.toml
+      STATE_PATH: /data/state.json
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    volumes:
+      - type: bind
+        source: ./data
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./zen-profile
+        target: /zen-profile
+        read_only: true
+        bind:
+          create_host_path: true
+      - type: bind
+        source: ./codex
+        target: /codex
+        bind:
+          create_host_path: false
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

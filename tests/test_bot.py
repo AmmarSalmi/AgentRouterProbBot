@@ -4,9 +4,11 @@ from pathlib import Path
 from agentrouter_prober.app import Prober
 from agentrouter_prober.bot import TelegramCommands
 from agentrouter_prober.clients import (
+    AccountUsage,
     ModelObservation,
     ModelProbe,
     ProbeOutcome,
+    ProtocolError,
     TelegramBot,
 )
 from agentrouter_prober.config import Settings, TelegramSettings
@@ -68,6 +70,7 @@ def callback(model, user_id=42):
 class FakeAgent:
     def __init__(self):
         self.status_calls = 0
+        self.account_calls = 0
         self.probed = []
         self.observations = {
             "gpt-6.1-sol": ModelObservation(
@@ -85,6 +88,10 @@ class FakeAgent:
     async def fetch_model_status(self):
         self.status_calls += 1
         return self.observations
+
+    async def fetch_account_usage(self):
+        self.account_calls += 1
+        return AccountUsage(6250000, 2500000, 321, "vip", 500000.0, True)
 
     async def probe_model(self, observation):
         self.probed.append(observation.name)
@@ -152,6 +159,35 @@ def test_probe_now_forces_a_new_complete_cycle(state_directory):
     assert telegram.sent[-1][0] == (
         "gpt-6.1-sol ✅\ngpt-6.2-sol ❌\nclaude-opus-5-5 ❌"
     )
+
+
+def test_balance_command_reads_account_without_probing_models(state_directory):
+    _, agent, telegram, commands = setup(state_directory)
+    asyncio.run(commands.handle_update(message("/balance")))
+    assert agent.account_calls == 1
+    assert agent.status_calls == 0
+    assert agent.probed == []
+    assert telegram.sent[-1][0] == (
+        "AgentRouter balance\n\n"
+        "Current balance: $12.50\n"
+        "Total consumed: $5.00\n"
+        "Requests: 321\n"
+        "Group: vip"
+    )
+
+
+def test_usage_alias_reports_account_errors_without_stopping_commands(state_directory):
+    class FailingAgent(FakeAgent):
+        async def fetch_account_usage(self):
+            self.account_calls += 1
+            raise ProtocolError("session expired")
+
+    settings = make_settings(state_directory)
+    agent, telegram = FailingAgent(), FakeTelegram()
+    commands = TelegramCommands(Prober(settings, agent, telegram))
+    asyncio.run(commands.handle_update(message("/usage")))
+    assert agent.account_calls == 1
+    assert telegram.sent[-1][0] == "AgentRouter balance check failed: session expired"
 
 
 def test_codex_picker_only_shows_responses_models(state_directory):
