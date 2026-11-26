@@ -83,15 +83,15 @@ Tap **Help** (`/help`) for a quick guide in Telegram. The bot probes AgentRouter
 models automatically and sends alerts when availability changes or the
 probing key is low on quota.
 
-- **Status** (`/status`) shows the latest model availability results. A ✅ marks
-  confirmed availability, and other results appear as ❌. Status waits for a
-  running cycle, reads saved results, or starts a cycle when there are none.
+- **Status** (`/status`) shows the latest model probes. ✅ means available,
+  ❌ means unavailable, and ❔ means unknown. Status waits for a running cycle,
+  reads saved results, or starts a cycle when there are none.
 - **Probe Now** (`/probe_now`) refreshes the model list and probes every listed
   model immediately.
-- **Balance & Usage** (`/balance`) shows your balance, total usage, request count,
+- **Balance** (`/balance`) shows your balance, total usage, request count,
   and account group. The bot uses AgentRouter’s public `/api/status` settings
   to convert quota to dollars.
-- **Probing Schedule** (`/probing_schedule`) sets automatic probes to run every
+- **Schedule** (`/probing_schedule`) sets automatic probes to run every
   5, 15, or 30 minutes or restores the default interval. Changes apply to the
   next automatic probe and persist across restarts. The default comes from
   `POLL_SECONDS`.
@@ -104,7 +104,7 @@ probing key is low on quota.
   weeks. View a report on demand or enable automatic delivery.
 
 You can also use `/usage` for balance, `/probe` for Probe Now, and `/schedule`
-for Probing Schedule.
+for Schedule.
 
 Send `/start` to refresh the keyboard. The bot accepts commands from the
 registered user in a private chat. An explicitly configured group or channel
@@ -113,7 +113,7 @@ can receive alerts. Command replies and alerts share Telegram rate limits.
 ## Credit alerts
 
 Open **Credit Alerts**, choose a type, and enter a positive amount in the units
-shown by **Balance & Usage**. Use up to two decimal places for dollars or a whole
+shown by **Balance**. Use up to two decimal places for dollars or a whole
 number for quota units.
 
 - **Spending Alert** adds the amount to your total usage at setup. The bot
@@ -136,18 +136,19 @@ per-key balance to monitor.
 ## API key monitoring
 
 Open **API Keys** to see the shared account balance alongside the quota and
-lifetime spending for each key. A key’s quota is its individual spending cap
-on the shared account balance. Keys without a cap show **Unlimited**. The bot
-reads these fields with the dashboard token and uses numeric key IDs to keep
-keys with duplicate names or renamed keys distinct. It shows key metadata in
-the registered private chat.
+lifetime spending for each key. The bar shows the share spent, followed by
+`[spent/left]`. ✅ marks active keys. ❌ marks inactive keys and appears alongside
+the reason. A key’s quota is its individual spending cap on the shared account
+balance. Unlimited keys show `∞`. The bot reads these fields with the dashboard
+token and uses numeric key IDs to keep keys with duplicate names or renamed
+keys distinct. It shows key metadata in the registered private chat.
 
 - **Last 24 Hours** and **Last 7 Days** show spend, logged request counts, and
   the top models by spend for that key. The reports use AgentRouter’s available
   consumption logs.
 - **Key Alerts** lets you set a one-time alert for additional spending, quota
   below a threshold, or a set number of days before expiry. Setting the same
-  alert again replaces it. **Clear Key Alerts** clears the selected key’s
+  alert again replaces it. **Clear Alerts** clears the selected key’s
   custom alerts. The automatic probing-key warning runs independently.
 - **Troubleshoot Key** shows whether the key is disabled, expired, or out of
   quota, along with its group and model and IP restrictions. It also displays

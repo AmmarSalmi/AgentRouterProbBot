@@ -337,10 +337,10 @@ def test_daemon_menu_handles_commands_queued_after_start(
     updates = [
         message(1, 42, "/start"),
         message(2, 42, "/status"),
-        message(3, 42, "Probing Schedule"),
+        message(3, 42, "⏱️ Schedule"),
         message(4, 42, "Every 30 min"),
         message(5, 99, "/status"),
-        message(6, 42, "Help"),
+        message(6, 42, "❓ Help"),
         message(7, 42, "/help@test_bot"),
     ]
 
@@ -377,22 +377,22 @@ def test_daemon_menu_handles_commands_queued_after_start(
 
     asyncio.run(run())
     texts = [item["text"] for item in sent]
-    assert "gpt-6-astra ✅" in texts
-    assert any(text.startswith("Probing Schedule") and "15 minutes" in text for text in texts)
-    assert "Automatic probes every 30 minutes." in texts
+    assert "📡 Model Status\n\n✅ gpt-6-astra" in texts
+    assert any(text.startswith("⏱️ Probing Schedule") and "15 minutes" in text for text in texts)
+    assert "✅ Automatic probes every 30 minutes" in texts
     assert texts.count(TELEGRAM_HELP) == 2
     assert all(item["chat_id"] == "42" for item in sent)
     assert sent[0]["reply_markup"]["keyboard"] == [
-        [{"text": "Status"}, {"text": "Probe Now"}],
-        [{"text": "Balance & Usage"}, {"text": "Probing Schedule"}],
-        [{"text": "Credit Alerts"}, {"text": "API Keys"}],
-        [{"text": "Weekly Digest"}, {"text": "Help"}],
+        [{"text": "📡 Status"}, {"text": "⚡ Probe Now"}],
+        [{"text": "💰 Balance"}, {"text": "🔑 API Keys"}],
+        [{"text": "🔔 Credit Alerts"}, {"text": "📊 Weekly Digest"}],
+        [{"text": "⏱️ Schedule"}, {"text": "❓ Help"}],
     ]
     assert menus[0][0] == "setMyCommands"
     assert menus[0][1]["scope"] == {"type": "chat", "chat_id": 42}
     assert [item["command"] for item in menus[0][1]["commands"]] == [
-        "status", "balance", "probe_now", "probing_schedule", "credit_alerts", "api_keys",
-        "weekly_digest", "help",
+        "status", "probe_now", "balance", "api_keys", "credit_alerts", "weekly_digest",
+        "probing_schedule", "help",
     ]
     assert menus[1] == ("setChatMenuButton", {"chat_id": 42, "menu_button": {"type": "commands"}})
     assert offsets == [None, 2, None, 8]

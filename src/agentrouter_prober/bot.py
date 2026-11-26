@@ -29,6 +29,8 @@ from .messages import (
     format_duration,
     probing_schedule_message,
     status_message,
+    telegram_button_action,
+    telegram_keyboard,
     telegram_message_parts,
 )
 from .state import CreditAlertKind, KeyAlertKind, utc_now
@@ -39,12 +41,15 @@ LOGGER = logging.getLogger(__name__)
 CREDIT_AMOUNT = re.compile(
     r"(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]{1,2})?|\.[0-9]{1,2}"
 )
-KEY_SELECTION = re.compile(r"Key #([0-9]{1,19})(?: · .*)?", re.IGNORECASE)
+KEY_SELECTION = re.compile(r"Key #([0-9]{1,19})(?: · .*)?|🔑 .+ \(#([0-9]{1,19})\)", re.IGNORECASE)
 KEY_PAGE_SIZE = 8
 KEY_ALERT_ACTIONS: dict[str, KeyAlertKind] = {
     "key spending alert": "spending",
+    "spend alert": "spending",
     "key low-quota alert": "balance",
+    "low quota": "balance",
     "key expiry reminder": "expiry",
+    "expiry reminder": "expiry",
 }
 KEY_HISTORY_PERIODS = {"last 24 hours": (1, "Last 24 hours"), "last 7 days": (7, "Last 7 days")}
 KEY_ACTIONS = {
@@ -54,14 +59,12 @@ KEY_ACTIONS = {
 WEEKLY_ACTIONS = {"weekly digest", "view weekly report", "enable weekly digest", "disable weekly digest"}
 
 
-def _keyboard(*rows: tuple[str, ...]) -> dict[str, Any]:
-    return {"keyboard": [[{"text": label} for label in row] for row in rows], "resize_keyboard": True}
-
-
-KEY_MENU = _keyboard(("Last 24 Hours", "Last 7 Days"), ("Key Alerts", "Troubleshoot Key"), ("API Keys", "Back"))
-KEY_ALERT_MENU = _keyboard(
-    ("Key Spending Alert", "Key Low-Quota Alert"),
-    ("Key Expiry Reminder", "Clear Key Alerts"),
+KEY_MENU = telegram_keyboard(
+    ("Last 24 Hours", "Last 7 Days"), ("Key Alerts", "Troubleshoot Key"), ("API Keys", "Back")
+)
+KEY_ALERT_MENU = telegram_keyboard(
+    ("Spend Alert", "Low Quota"),
+    ("Expiry Reminder", "Clear Alerts"),
     ("Key Details", "API Keys"),
 )
 
@@ -141,7 +144,7 @@ class TelegramCommands:
                 "/weekly_digest": "weekly digest",
                 "/help": "help",
             }.get(command.lower())
-        text = " ".join(text.lower().split())
+        text = telegram_button_action(text)
         if text in SCHEDULE_CHOICES:
             return text
         if text in KEY_ACTIONS or text in WEEKLY_ACTIONS or text in {"api keys", "next keys", "previous keys"}:
@@ -153,9 +156,14 @@ class TelegramCommands:
             "usage": "balance",
             "probe now": "probe",
             "probing schedule": "schedule",
+            "schedule": "schedule",
             "credit alerts": "credit_alerts",
             "spending alert": "spending_alert",
             "low balance alert": "balance_alert",
+            "clear alerts": "clear key alerts",
+            "view report": "view weekly report",
+            "enable auto-send": "enable weekly digest",
+            "disable auto-send": "disable weekly digest",
             "help": "help",
             "back": "menu",
         }.get(text)
@@ -196,14 +204,14 @@ class TelegramCommands:
     async def _show_api_keys(self, page: int) -> None:
         keys = await self.prober.agentrouter.fetch_api_keys()
         if not keys:
-            await self._reply("No API keys are listed on this AgentRouter account.")
+            await self._reply("🔑 API Keys\n\nNo keys listed.")
             return
         ordered = sorted(keys.values(), key=lambda key: (key.name.casefold(), key.id))
         pages = (len(ordered) + KEY_PAGE_SIZE - 1) // KEY_PAGE_SIZE
         self._key_page = min(max(page, 0), pages - 1)
         start = self._key_page * KEY_PAGE_SIZE
         entries = ordered[start:start + KEY_PAGE_SIZE]
-        labels = [(f"Key #{key.id} · {key.name}"[:64],) for key in entries]
+        labels = [(f"🔑 {key_label(key, max_length=62)}",) for key in entries]
         navigation = tuple(
             label for label, show in (
                 ("Previous Keys", self._key_page > 0), ("Next Keys", self._key_page < pages - 1),
@@ -221,10 +229,11 @@ class TelegramCommands:
             balance = "Unlimited" if usage.quota < 0 else format_account_amount(usage, usage.quota)
         now = int(utc_now().timestamp())
         summaries = "\n\n".join(key_summary(key, display, now) for key in entries)
+        page_number = f" · {self._key_page + 1}/{pages}" if pages > 1 else ""
         await self._reply(
-            f"API Keys · Page {self._key_page + 1} of {pages}\n"
-            f"Shared account balance: {balance}\n\n{summaries}",
-            reply_markup=_keyboard(*labels),
+            f"🔑 API Keys{page_number}\n💰 Shared balance · {balance}\n"
+            f"Bars show % spent · [spent/left]\n\n{summaries}",
+            reply_markup=telegram_keyboard(*labels),
         )
 
     async def _save_key_alert(self, key_id: int, kind: KeyAlertKind, text: str) -> None:
@@ -249,7 +258,7 @@ class TelegramCommands:
         # Keep clearing alerts possible when an old keyboard refers to a deleted key.
         if command == "clear key alerts":
             self.prober.clear_key_alerts(key_id)
-            await self._reply(f"Custom alerts cleared for key #{key_id}.", reply_markup=KEY_ALERT_MENU)
+            await self._reply(f"✅ Custom alerts cleared for key #{key_id}.", reply_markup=KEY_ALERT_MENU)
             return
         key = await self.prober.api_key(key_id)
         now = int(utc_now().timestamp())
@@ -265,17 +274,17 @@ class TelegramCommands:
             await self._reply(key_history_message(key, totals, label, display), reply_markup=KEY_MENU)
         elif command == "key alerts":
             monitoring = self.prober.key_monitoring
-            active = [alert for (id_, _), alert in monitoring.key_alerts.items() if id_ == key_id] if monitoring else []
+            count = sum(id_ == key_id for id_, _ in monitoring.key_alerts) if monitoring else 0
             await self._reply(
-                f"Alerts for {key_label(key)} · {len(active)} saved\nEach alert sends once.",
+                f"🔔 Key Alerts · {count} set\n{key_label(key)}\n\nEach alert sends once.",
                 reply_markup=KEY_ALERT_MENU,
             )
         else:
             self._key_alert_input = KEY_ALERT_ACTIONS[command]
             prompt = {
-                "spending": "Enter how much more this key should spend before the alert.",
-                "balance": "Enter the quota level to alert below.",
-                "expiry": "Enter how many days before expiry to send a reminder.",
+                "spending": "Enter the additional spend to alert on.",
+                "balance": "Enter the quota threshold to alert below.",
+                "expiry": "Enter the number of days before expiry to send the reminder.",
             }[self._key_alert_input]
             if self._key_alert_input != "expiry":
                 prompt += " Use the units shown for this key."
@@ -286,14 +295,17 @@ class TelegramCommands:
             self.prober.set_weekly_digest(command == "enable weekly digest")
         monitoring = self.prober.key_monitoring
         enabled = monitoring is not None and monitoring.weekly_digest is not None
-        menu = _keyboard(("View Weekly Report",), (f"{'Disable' if enabled else 'Enable'} Weekly Digest", "Back"))
+        menu = telegram_keyboard(
+            ("View Report",), ("Disable Auto-send" if enabled else "Enable Auto-send", "Back")
+        )
         if command == "view weekly report":
             await self._reply(await self.prober.weekly_usage(), reply_markup=menu)
         else:
             await self._reply(
-                f"Weekly Digest\n\nAutomatic delivery is {'on' if enabled else 'off'}. "
-                "The digest compares the last two completed UTC weeks. When enabled, "
-                "the bot sends it after the week ends on Monday at 00:00 UTC.",
+                "📊 Weekly Digest\n\n"
+                f"Auto-send · {'On' if enabled else 'Off'}\n"
+                "Compares the last two completed UTC weeks.\n"
+                "Delivery after Monday 00:00 UTC when enabled.",
                 reply_markup=menu,
             )
 
@@ -324,7 +336,7 @@ class TelegramCommands:
         if selected is not None:
             self._credit_alert_input = None
             self._key_alert_input = None
-            await self._handle_monitoring("key details", int(selected[1]))
+            await self._handle_monitoring("key details", int(selected[1] or selected[2]))
             return
         if command is None:
             if not text.startswith("/"):
@@ -338,11 +350,11 @@ class TelegramCommands:
 
         if command == "status":
             if not self.prober.has_model_status:
-                await self._reply("Checking every model listed on AgentRouter…")
+                await self._reply("⏳ Checking listed models…")
             snapshot = await self.prober.status_snapshot()
-            await self._reply(status_message(self.prober.settings, snapshot))
+            await self._reply(status_message(snapshot))
         elif command == "balance":
-            await self._reply("Checking your AgentRouter balance…")
+            await self._reply("⏳ Checking balance…")
             try:
                 usage = await self.prober.account_usage()
             except ClientError as exc:
@@ -350,9 +362,9 @@ class TelegramCommands:
             else:
                 await self._reply(account_usage_message(usage))
         elif command == "probe":
-            await self._reply("Refreshing model-status and probing every listed model…")
+            await self._reply("⏳ Probing every listed model…")
             await self.prober.run_cycle()
-            await self._reply(status_message(self.prober.settings, self.prober.state))
+            await self._reply(status_message(self.prober.state))
         elif command == "schedule":
             await self._reply(
                 probing_schedule_message(
@@ -371,28 +383,28 @@ class TelegramCommands:
                 )
             else:
                 await self._reply(
-                    f"Automatic probes every {format_duration(self.prober.poll_seconds)}."
+                    f"✅ Automatic probes every {format_duration(self.prober.poll_seconds)}"
                 )
         elif command == "credit_alerts":
             await self._reply(
-                "Choose a credit alert. Each alert sends once.",
+                "🔔 Credit Alerts\n\nEach alert sends once.",
                 reply_markup=TELEGRAM_CREDIT_ALERT_MENU,
             )
         elif command in {"spending_alert", "balance_alert"}:
             if command == "spending_alert":
                 self._credit_alert_input = "spending"
-                prompt = "Enter how much more credit to spend before the alert."
+                prompt = "Enter the additional spend to alert on."
             else:
                 self._credit_alert_input = "balance"
                 prompt = "Enter the balance to alert below."
             await self._reply(
-                f"{prompt} Use the units shown in Balance & Usage.",
+                f"{prompt} Use the units shown in Balance.",
                 reply_markup=TELEGRAM_CREDIT_ALERT_MENU,
             )
         elif command == "help":
             await self._reply(TELEGRAM_HELP)
         elif command == "menu":
-            await self._reply("Choose an action below.")
+            await self._reply("🤖 AgentRouter")
         else:
             await self._handle_monitoring(command)
 

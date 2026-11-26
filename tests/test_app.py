@@ -135,8 +135,8 @@ def test_credit_alerts_survive_restart_and_trigger_once_from_live_usage(state_di
 
     asyncio.run(run())
     assert telegram.messages == [
-        "Spending alert\n\nYou’ve used $7.50 in total, reaching your $7.50 target.",
-        "Low balance alert\n\nYour balance is $9.50, below $10.00. Total used is $18.00.",
+        "🔔 Spending alert\n\n$7.50 total spent · $7.50 target",
+        "⚠️ Low balance alert\n\n$9.50 left · $10.00 threshold\n$18.00 total spent",
     ]
     assert StateStore(settings.state_path).load().credit_alerts == {}
 
@@ -171,9 +171,9 @@ def test_probe_key_warning_retries_and_rearms_after_quota_recovers(state_directo
             assert result.notifications_sent == expected
             assert not result.fatal_error
         assert len(telegram.messages) == 2
-        assert "$0.75 in quota left" in telegram.messages[0]
-        assert "$0.00 in quota left" in telegram.messages[1]
-        assert all("threshold is $1.00" in message for message in telegram.messages)
+        assert "$0.75 left" in telegram.messages[0]
+        assert "$0.00 left" in telegram.messages[1]
+        assert all("$1.00 threshold" in message for message in telegram.messages)
         assert StateStore(settings.state_path).load().probe_key_alert is None
 
     asyncio.run(run())
@@ -220,7 +220,7 @@ def test_pending_credit_alert_retries_for_its_recipient_after_restart(
 
         assert (await restarted.run_cycle()).notifications_sent == 1
         assert telegram.messages == [
-            "Low balance alert\n\nYour balance is $9.50, below $10.00. Total used is $8.00."
+            "⚠️ Low balance alert\n\n$9.50 left · $10.00 threshold\n$8.00 total spent"
         ]
         assert monitor.account_calls == 0
         assert StateStore(settings.state_path).load().credit_alerts == {}
@@ -282,10 +282,10 @@ def test_selected_keys_alert_once_and_digest_retries_after_restart(state_directo
         restarted = Prober(settings, agent, telegram)
         assert (await restarted.run_cycle()).notifications_sent == 4
         assert (await restarted.run_cycle()).notifications_sent == 0
-        assert "Renamed (#4) has spent $2.00" in telegram.messages[0]
-        assert "Renamed (#4) has $0.80 left" in telegram.messages[1]
-        assert "Coding (#5) expires 2026-11-25" in telegram.messages[2]
-        assert "Spent: $4.00 · Prior week: $1.00" in telegram.messages[3]
+        assert "Renamed (#4)\n\n$2.00 total spent · $2.00 target" in telegram.messages[0]
+        assert "Renamed (#4)\n\n$0.80 left · $1.00 threshold" in telegram.messages[1]
+        assert "Coding (#5)\n\nExpires · 2026-11-25" in telegram.messages[2]
+        assert "$4.00 spent · 4 logged requests\n↑ $3.00 vs prior week ($1.00)" in telegram.messages[3]
         assert "Coding (#4) · $4.00" in telegram.messages[3] and "alpha · $4.00" in telegram.messages[3]
         end = int(monday.timestamp())
         assert agent.windows == [(end - WEEK_SECONDS, end), (end - WEEK_SECONDS * 2, end - WEEK_SECONDS)]
@@ -393,7 +393,7 @@ def test_every_status_model_is_probed_on_every_cycle_and_notified_once(state_dir
     ]
     assert [first.notifications_sent, second.notifications_sent] == [1, 0]
     assert telegram.messages == [
-        "Available:\ngpt-6.2-sol\ngpt-5.6-sol\n\nNot available:\nclaude-opus-5-5"
+        "✅ Available\ngpt-6.2-sol\ngpt-5.6-sol\n\n❌ Unavailable\nclaude-opus-5-5"
     ]
     saved = StateStore(path).load()
     assert saved.active_models == ["gpt-6.2-sol", "gpt-5.6-sol", "claude-opus-5-5"]
@@ -416,7 +416,7 @@ def test_unavailable_then_available_sends_recovery_notification(state_directory)
     for offset in (0, 15, 30):
         asyncio.run(prober.run_cycle(now + timedelta(minutes=offset)))
     assert telegram.messages == [
-        "Available:\ngpt", "Not available:\ngpt", "Available:\ngpt"
+        "✅ Available\ngpt", "❌ Unavailable\ngpt", "✅ Available\ngpt"
     ]
 
 
@@ -430,7 +430,7 @@ def test_all_unavailable_models_send_one_list_without_repeating(state_directory)
     prober = Prober(make_settings(path), agent, telegram)
     asyncio.run(prober.run_cycle())
     asyncio.run(prober.run_cycle())
-    assert telegram.messages == ["Not available:\nfirst\nsecond"]
+    assert telegram.messages == ["❌ Unavailable\nfirst\nsecond"]
 
 
 def test_long_model_list_fits_telegram_messages_without_losing_models(state_directory):
@@ -443,7 +443,7 @@ def test_long_model_list_fits_telegram_messages_without_losing_models(state_dire
     result = asyncio.run(prober.run_cycle())
     assert result.notifications_sent == len(telegram.messages) > 1
     assert all(len(message) <= 4000 for message in telegram.messages)
-    assert "\n".join(telegram.messages).splitlines() == ["Available:", *models]
+    assert "\n".join(telegram.messages).splitlines() == ["✅ Available", *models]
     assert all(not prober.state.model(model).notification_pending for model in models)
 
 
@@ -479,7 +479,7 @@ def test_rate_limited_list_survives_restart_and_retries_after_deadline(
     clock[0] += timedelta(seconds=30)
     third = asyncio.run(restarted.run_cycle(clock[0]))
     assert third.notifications_sent == 1
-    assert telegram.messages == ["Available:\nready\n\nNot available:\ndown"]
+    assert telegram.messages == ["✅ Available\nready\n\n❌ Unavailable\ndown"]
     saved = StateStore(path).load()
     assert saved.telegram_retry_at is None
     assert all(not saved.model(model).notification_pending for model in saved.active_models)
@@ -514,4 +514,4 @@ def test_transient_probe_error_is_recorded_without_faking_unavailability(state_d
     assert result.dashboard_ok
     assert record.availability == "unknown"
     assert record.probe_error == "temporary model error"
-    assert telegram.messages == ["Available:\nworking\n\nUnknown:\ngpt"]
+    assert telegram.messages == ["✅ Available\nworking\n\n❔ Unknown\ngpt"]

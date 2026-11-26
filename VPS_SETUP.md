@@ -59,7 +59,7 @@ sudo docker compose logs --tail=80 prober
 sudo docker compose ps
 ```
 
-Use **Status**, **Balance & Usage**, and **Probe Now** in Telegram. Saved
+Use **Status**, **Balance**, and **Probe Now** in Telegram. Saved
 probe results and registration are in `data/state.json` and `data/telegram.json`.
 
 ## Refresh the dashboard token

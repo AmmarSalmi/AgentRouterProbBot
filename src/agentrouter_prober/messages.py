@@ -1,80 +1,112 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 
 from .clients import AccountUsage, QuotaDisplay
-from .config import Settings
 from .state import CreditAlertKind, ModelRecord, PersistentState
 
 
-TELEGRAM_COMMANDS = [
-    {"command": "status", "description": "Show live model probes"},
-    {"command": "balance", "description": "Show balance and usage"},
-    {"command": "probe_now", "description": "Probe every listed model now"},
-    {"command": "probing_schedule", "description": "View or change the probing interval"},
-    {"command": "credit_alerts", "description": "Set spending and balance alerts"},
-    {"command": "api_keys", "description": "Monitor and troubleshoot API keys"},
-    {"command": "weekly_digest", "description": "View or subscribe to the weekly spending digest"},
-    {"command": "help", "description": "Show a quick guide to the bot"},
-]
-TELEGRAM_MENU = {
-    "keyboard": [
-        [{"text": "Status"}, {"text": "Probe Now"}],
-        [{"text": "Balance & Usage"}, {"text": "Probing Schedule"}],
-        [{"text": "Credit Alerts"}, {"text": "API Keys"}],
-        [{"text": "Weekly Digest"}, {"text": "Help"}],
-    ],
-    "resize_keyboard": True,
-    "is_persistent": True,
+_BUTTON_ICONS = {
+    "Status": "📡",
+    "Probe Now": "⚡",
+    "Balance": "💰",
+    "API Keys": "🔑",
+    "Credit Alerts": "🔔",
+    "Weekly Digest": "📊",
+    "Schedule": "⏱️",
+    "Help": "❓",
+    "Key Alerts": "🔔",
+    "Troubleshoot Key": "🛠️",
+    "Previous Keys": "⬅️",
+    "Next Keys": "➡️",
+    "Back": "↩️",
 }
+
+
+def telegram_keyboard(*rows: tuple[str, ...], **options: bool) -> dict[str, Any]:
+    return {
+        "keyboard": [
+            [
+                {"text": f"{_BUTTON_ICONS[label]} {label}" if label in _BUTTON_ICONS else label}
+                for label in row
+            ]
+            for row in rows
+        ],
+        "resize_keyboard": True,
+        **options,
+    }
+
+
+def telegram_button_action(text: str) -> str:
+    action = " ".join(text.lower().split())
+    icon, _, label = action.partition(" ")
+    return label if icon in _BUTTON_ICONS.values() else action
+
+
+TELEGRAM_COMMANDS = [
+    {"command": "status", "description": "📡 Latest model probes"},
+    {"command": "probe_now", "description": "⚡ Probe every listed model"},
+    {"command": "balance", "description": "💰 Balance and usage"},
+    {"command": "api_keys", "description": "🔑 Key quotas, usage, and alerts"},
+    {"command": "credit_alerts", "description": "🔔 Spending and balance alerts"},
+    {"command": "weekly_digest", "description": "📊 Weekly spending report"},
+    {"command": "probing_schedule", "description": "⏱️ Change the probe interval"},
+    {"command": "help", "description": "❓ Quick guide"},
+]
+TELEGRAM_MENU = telegram_keyboard(
+    ("Status", "Probe Now"),
+    ("Balance", "API Keys"),
+    ("Credit Alerts", "Weekly Digest"),
+    ("Schedule", "Help"),
+    is_persistent=True,
+)
 TELEGRAM_HELP = (
-    "The bot probes AgentRouter models automatically and sends alerts when "
-    "availability changes or the probing key is low on quota.\n\n"
-    "• Status (/status) shows the latest model availability results.\n"
-    "• Probe Now (/probe_now) refreshes the model list and probes every listed model immediately.\n"
-    "• Balance & Usage (/balance) shows your balance, total usage, request count, and account group.\n"
-    "• Probing Schedule (/probing_schedule) sets automatic probes to run every 5, 15, "
-    "or 30 minutes or restores the default interval.\n"
-    "• Credit Alerts (/credit_alerts) sets one-time alerts for additional account spending or a low wallet balance.\n"
-    "• API Keys (/api_keys) shows quota left, total spent, and status for each key. Pick a key for "
-    "24-hour and 7-day usage, low-quota and spending alerts, expiry reminders, and troubleshooting.\n"
-    "• Weekly Digest (/weekly_digest) compares the last two completed UTC weeks and shows the "
-    "top keys and models by spending. Enable automatic delivery from that menu.\n\n"
+    "❓ AgentRouter Help\n\n"
+    "📡 Status (/status) · ✅ available, ❌ unavailable, ❔ unknown\n"
+    "⚡ Probe Now (/probe_now) · Test every listed model\n"
+    "💰 Balance (/balance) · Wallet, total spend, requests, and group\n"
+    "🔑 API Keys (/api_keys) · Quota bars [spent/left]. Pick a key for 24h/7d usage, "
+    "spending and quota alerts, expiry reminders, and troubleshooting.\n"
+    "🔔 Credit Alerts (/credit_alerts) · One-time spending and low-balance alerts\n"
+    "📊 Weekly Digest (/weekly_digest) · Compare the last two completed UTC weeks. "
+    "See top keys and models by spend or turn on auto-send.\n"
+    "⏱️ Schedule (/probing_schedule) · Probe every 5, 15, or 30 minutes, or use the default\n\n"
+    "Automatic alerts cover model availability changes and low probing-key quota.\n"
     "Send /start to refresh the keyboard."
 )
 SCHEDULE_CHOICES: dict[str, int | None] = {
     **{f"every {minutes} min": minutes * 60 for minutes in (5, 15, 30)},
     "use default": None,
 }
-TELEGRAM_SCHEDULE_MENU = {
-    "keyboard": [
-        [
-            {"text": label.capitalize()}
-            for label, seconds in SCHEDULE_CHOICES.items()
-            if seconds is not None
-        ],
-        [{"text": "Use default"}, {"text": "Back"}],
-    ],
-    "resize_keyboard": True,
-    "one_time_keyboard": True,
-}
-TELEGRAM_CREDIT_ALERT_MENU = {
-    "keyboard": [
-        [{"text": "Spending Alert"}, {"text": "Low Balance Alert"}],
-        [{"text": "Back"}],
-    ],
-    "resize_keyboard": True,
-    "one_time_keyboard": True,
+TELEGRAM_SCHEDULE_MENU = telegram_keyboard(
+    tuple(label.capitalize() for label, seconds in SCHEDULE_CHOICES.items() if seconds is not None),
+    ("Use default", "Back"),
+    one_time_keyboard=True,
+)
+TELEGRAM_CREDIT_ALERT_MENU = telegram_keyboard(
+    ("Spending Alert", "Low Balance Alert"), ("Back",), one_time_keyboard=True
+)
+
+MODEL_STATUS_ICONS = {
+    "available": "✅",
+    "unavailable": "❌",
+    "unknown": "❔",
 }
 
 
-def status_message(settings: Settings, state: PersistentState) -> str:
-    lines = []
-    for model in state.active_models:
-        record = state.models.get(model, ModelRecord())
-        available = record.availability == "available" and not record.probe_error
-        lines.append(f"{model} {'✅' if available else '❌'}")
-    return "\n".join(lines) or "No models checked yet."
+def model_probe_status(record: ModelRecord | None) -> str:
+    if record is not None and not record.probe_error and record.availability in MODEL_STATUS_ICONS:
+        return record.availability
+    return "unknown"
+
+
+def status_message(state: PersistentState) -> str:
+    lines = [
+        f"{MODEL_STATUS_ICONS[model_probe_status(state.models.get(model))]} {model}"
+        for model in state.active_models
+    ]
+    return "📡 Model Status\n\n" + ("\n".join(lines) or "No models checked yet.")
 
 
 def format_duration(seconds: int) -> str:
@@ -90,11 +122,9 @@ def format_duration(seconds: int) -> str:
 
 def probing_schedule_message(poll_seconds: int, probe_concurrency: int) -> str:
     return (
-        "Probing Schedule\n\n"
-        f"Every {format_duration(poll_seconds)}, the bot reads the AgentRouter dashboard's "
-        "model list and sends one greeting probe to every model listed there.\n"
-        f"At most {probe_concurrency} model probes run at once.\n\n"
-        "Choose an interval below."
+        "⏱️ Probing Schedule\n\n"
+        f"Every {format_duration(poll_seconds)} · up to {probe_concurrency} probes at once\n"
+        "One probe per model on the dashboard."
     )
 
 
@@ -112,23 +142,21 @@ def format_quota_amount(quota: int, display: QuotaDisplay) -> str:
 
 def probe_key_balance_message(balance: Decimal, threshold: Decimal) -> str:
     return (
-        "Low probing key balance\n\n"
-        f"The API key used for model probes has about ${balance:,.2f} in quota left. "
-        f"The warning threshold is ${threshold:,.2f}."
+        "⚠️ Low probing key balance\n\n"
+        f"${balance:,.2f} left · ${threshold:,.2f} threshold"
     )
 
 
 def account_usage_message(usage: AccountUsage) -> str:
-    balance = "Unlimited" if usage.quota < 0 else format_account_amount(usage, usage.quota)
-    return "\n".join(
-        [
-            "AgentRouter balance",
-            "",
-            f"Current balance: {balance}",
-            f"Total consumed: {format_account_amount(usage, usage.used_quota)}",
-            f"Requests: {usage.request_count:,}",
-            f"Group: {usage.group or 'default'}",
-        ]
+    balance = (
+        "Unlimited balance" if usage.quota < 0
+        else f"{format_account_amount(usage, usage.quota)} available"
+    )
+    return (
+        f"💰 {balance}\n\n"
+        f"Total spent · {format_account_amount(usage, usage.used_quota)}\n"
+        f"Requests · {usage.request_count:,}\n"
+        f"Group · {usage.group or 'default'}"
     )
 
 
@@ -140,37 +168,35 @@ def credit_alert_confirmation(
     if kind == "spending":
         additional = format_account_amount(usage, threshold - usage.used_quota)
         return (
-            f"Spending alert set for {additional} more.\n"
-            f"You have used {used} so far.\n"
-            f"You’ll be alerted at {target} in total usage."
+            "🔔 Spending alert set\n\n"
+            f"{used} spent · {additional} more\n"
+            f"Alert at {target} total spent"
         )
 
     balance = format_account_amount(usage, usage.quota)
     summary = (
-        f"Low-balance alert set for balances below {target}.\n"
-        f"Your balance is {balance} and you have used {used} so far."
+        "🔔 Low balance alert set\n\n"
+        f"{balance} left · {used} spent\n"
+        f"Alert when balance is below {target}"
     )
     if usage.quota < threshold:
-        return f"{summary}\nYour balance is already below the threshold. The alert is queued."
+        return f"{summary}\nAlert queued · already below threshold"
 
     additional_quota = usage.quota - threshold + 1
     additional = format_account_amount(usage, additional_quota)
     if additional == "$0.00":
         additional = "less than $0.01"
     projected = format_account_amount(usage, usage.used_quota + additional_quota)
-    return (
-        f"{summary}\nAt your current balance, expect the alert at about {projected} "
-        f"in total usage ({additional} more)."
-    )
+    return f"{summary}\nEst. spend at alert · {projected} ({additional} more)"
 
 
 def credit_alert_message(kind: CreditAlertKind, usage: AccountUsage, threshold: int) -> str:
     target = format_account_amount(usage, threshold)
     used = format_account_amount(usage, usage.used_quota)
     if kind == "spending":
-        return f"Spending alert\n\nYou’ve used {used} in total, reaching your {target} target."
+        return f"🔔 Spending alert\n\n{used} total spent · {target} target"
     balance = format_account_amount(usage, usage.quota)
-    return f"Low balance alert\n\nYour balance is {balance}, below {target}. Total used is {used}."
+    return f"⚠️ Low balance alert\n\n{balance} left · {target} threshold\n{used} total spent"
 
 
 def telegram_message_parts(text: str, limit: int = 4000) -> list[str]:
@@ -187,23 +213,11 @@ def telegram_message_parts(text: str, limit: int = 4000) -> list[str]:
 
 
 def availability_message(state: PersistentState) -> str:
-    groups: dict[str, list[str]] = {
-        "available": [],
-        "unavailable": [],
-        "unknown": [],
-    }
+    groups: dict[str, list[str]] = {status: [] for status in MODEL_STATUS_ICONS}
     for model in state.active_models:
-        record = state.models.get(model, ModelRecord())
-        availability = "unknown" if record.probe_error else record.availability
-        groups.get(availability, groups["unknown"]).append(model)
-
-    headings = {
-        "available": "Available:",
-        "unavailable": "Not available:",
-        "unknown": "Unknown:",
-    }
+        groups[model_probe_status(state.models.get(model))].append(model)
     return "\n\n".join(
-        "\n".join([headings[availability], *models])
+        "\n".join([f"{MODEL_STATUS_ICONS[availability]} {availability.capitalize()}", *models])
         for availability, models in groups.items()
         if models
     )
