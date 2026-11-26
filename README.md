@@ -46,14 +46,16 @@ Token**, select **Generate Token** and copy the raw token for
 Leave the AgentRouter values blank in the repository’s `.env` and start the
 bot. If `TELEGRAM_CHAT_ID` is blank, the first person to send `/start` in the
 bot’s private chat becomes its saved recipient. A configured chat ID skips
-registration.
+registration. If you prefill AgentRouter credentials, set `TELEGRAM_CHAT_ID` to
+your private chat ID before starting the bot so another user cannot claim it.
 
 In the registered private chat, tap **Status**, **Balance**, or any other
 AgentRouter feature. The bot prompts for missing credentials one at a time,
 in the order shown below. You can prefill any of the three in `.env` and enter
 the rest in Telegram. Send commands and credentials as text. The bot ignores
 incoming files, media, and captions, and attempts to delete credential messages
-after receiving them.
+after receiving them. If deletion fails, the bot asks you to delete the message
+manually and rotate the credential if it may have been exposed.
 
 1. API key for probing models (`sk-...`)
 2. Numeric AgentRouter account ID
@@ -72,10 +74,10 @@ AGENTROUTER_USER_ID=12345
 AGENTROUTER_DASHBOARD_TOKEN=your-dashboard-access-token
 ```
 
-With all three values present, the bot checks them on startup and skips the
-prompts if they pass. Use prefilled or saved credentials when the Telegram
-destination is a group or channel. Interactive setup takes place in a private
-chat.
+With all three values present, the bot checks them on startup, retries temporary
+failures, and skips the prompts once validation passes. Use prefilled or saved
+credentials when the Telegram destination is a group or channel. Interactive
+setup takes place in a private chat.
 
 ### Validation and storage
 
@@ -182,7 +184,8 @@ the previous one. An alert clears after Telegram accepts it.
 The bot also checks the API key used for model probes. It reads the key's
 remaining quota from the dashboard's key list and sends a Telegram warning
 when a limited key falls below $1.00 by default. Set `PROBE_KEY_LOW_BALANCE_USD`
-to change the threshold. The warning fires once per low-quota period and
+to change the threshold. Accounts that use quota units see the equivalent
+threshold in quota units. The warning fires once per low-quota period and
 rearms when the quota recovers to the threshold. Unlimited keys have no
 per-key balance to monitor.
 
@@ -261,7 +264,7 @@ corrupt registration produces an error.
 | --- | --- | --- |
 | `AGENTROUTER_BASE_URL` | `https://agentrouter.org` | Status and model API host |
 | `AGENTROUTER_API_KEY` | empty | Model key for probing. Can be entered through Telegram setup. |
-| `TELEGRAM_CHAT_ID` | empty | Explicit destination; otherwise register via Start |
+| `TELEGRAM_CHAT_ID` | empty | Numeric chat ID or `@username` for a channel. Leave blank to register via Start. |
 | `TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | Telegram API host |
 | `AGENTROUTER_DASHBOARD_TOKEN` | empty | Dashboard access token for balance, model discovery, API key metadata, and usage logs |
 | `AGENTROUTER_USER_ID` | empty | Positive account ID paired with the dashboard token |
@@ -279,9 +282,12 @@ corrupt registration produces an error.
 `NORMAL_POLL_SECONDS` and `CONFIRM_MAX_OUTPUT_TOKENS` remain fallbacks for
 `POLL_SECONDS` and `PROBE_MAX_OUTPUT_TOKENS`, respectively.
 
-Docker's `--healthcheck` permits the bot to wait for missing credentials.
-Once the three values are present, it checks the age of the last successful
-model-status read.
+Docker's `--healthcheck` validates local configuration, including the presence
+of `TELEGRAM_BOT_TOKEN`, and permits the bot to wait for AgentRouter setup.
+Once the three AgentRouter values are present, it checks the age of the last
+successful model-status read. At service startup, unreadable state data is
+preserved beside `STATE_PATH` with a `.corrupt-` suffix before monitoring starts
+with empty state.
 
 ## Tests
 

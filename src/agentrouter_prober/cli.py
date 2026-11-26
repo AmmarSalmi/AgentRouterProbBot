@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from collections.abc import Coroutine
 from contextlib import contextmanager
 from pathlib import Path
@@ -19,13 +20,7 @@ from .clients import (
     TelegramClient,
     TransientClientError,
 )
-from .config import (
-    AGENTROUTER_CREDENTIALS,
-    ConfigurationError,
-    Settings,
-    TelegramSettings,
-    load_agentrouter_credentials,
-)
+from .config import ConfigurationError, Settings, TelegramSettings
 from .setup import AgentRouterSetup
 from .state import health_is_fresh
 from .telegram import resolve_telegram_chat
@@ -57,7 +52,7 @@ def _configure_logging() -> None:
         format="%(asctime)sZ %(levelname)s %(name)s: %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
-    logging.Formatter.converter = __import__("time").gmtime
+    logging.Formatter.converter = time.gmtime
     # HTTP transport logs include Telegram's credential-bearing request URLs.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -166,11 +161,14 @@ def main(argv: list[str] | None = None) -> int:
     _configure_logging()
     try:
         if args.healthcheck:
-            path = Path(os.getenv("STATE_PATH", "/data/state.json"))
-            if len(load_agentrouter_credentials(path)) < len(AGENTROUTER_CREDENTIALS):
+            settings = Settings.from_env()
+            if not (
+                settings.agentrouter_api_key
+                and settings.agentrouter_user_id
+                and settings.agentrouter_dashboard_token
+            ):
                 return 0
-            max_age = int(os.getenv("HEALTH_MAX_AGE_SECONDS", "3600"))
-            return 0 if health_is_fresh(path, max_age) else 1
+            return 0 if health_is_fresh(settings.state_path, settings.health_max_age_seconds) else 1
         if args.test_telegram:
             return asyncio.run(_test_telegram())
         return asyncio.run(_run(Settings.from_env(require_agentrouter=args.once), args.once))
@@ -179,6 +177,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except (AuthenticationError, ProtocolError, TransientClientError) as exc:
         logging.getLogger(__name__).error("Request failed: %s", exc)
+        return 2
+    except OSError as exc:
+        logging.getLogger(__name__).error("Filesystem operation failed: %s", exc)
         return 2
     except KeyboardInterrupt:
         return 130

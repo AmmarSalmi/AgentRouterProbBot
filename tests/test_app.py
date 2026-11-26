@@ -179,6 +179,21 @@ def test_probe_key_warning_retries_and_rearms_after_quota_recovers(state_directo
     asyncio.run(run())
 
 
+def test_probe_key_warning_uses_quota_units_for_quota_accounts(state_directory):
+    class QuotaAgentRouter(FakeAgentRouter):
+        async def quota_display_settings(self):
+            return 500_000.0, False
+
+    settings = make_settings(state_directory / "state.json")
+    agent = QuotaAgentRouter([{}], [], probe_key_balances=[Decimal("0.75")])
+    telegram = FakeTelegram()
+    asyncio.run(Prober(settings, agent, telegram).run_cycle())
+
+    assert telegram.messages == [
+        "⚠️ Low probing key balance\n\n375,000 quota left · 500,000 quota threshold"
+    ]
+
+
 def test_pending_credit_alert_retries_for_its_recipient_after_restart(
     state_directory, monkeypatch
 ):

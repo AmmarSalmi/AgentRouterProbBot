@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -133,9 +134,14 @@ class TelegramSettings:
 
     @classmethod
     def from_env(cls) -> "TelegramSettings":
+        chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip() or None
+        if chat_id is not None and not re.fullmatch(
+            r"[+-]?[0-9]*[1-9][0-9]*|@[A-Za-z0-9_]+", chat_id
+        ):
+            raise ConfigurationError("TELEGRAM_CHAT_ID must be a nonzero chat ID or an @username")
         return cls(
             bot_token=_required_any("TELEGRAM_BOT_TOKEN"),
-            chat_id=os.getenv("TELEGRAM_CHAT_ID", "").strip() or None,
+            chat_id=chat_id,
             api_base_url=_url("TELEGRAM_API_BASE_URL", "https://api.telegram.org"),
         )
 

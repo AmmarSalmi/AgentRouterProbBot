@@ -37,7 +37,7 @@ from .messages import (
 )
 from .setup import AgentRouterSetup
 from .state import CreditAlertKind, KeyAlertKind, utc_now
-from .telegram import _plain_message_text, _retry
+from .telegram import plain_message_text, retry_telegram
 
 
 LOGGER = logging.getLogger(__name__)
@@ -112,6 +112,7 @@ class TelegramCommands:
         self._setup = setup
         self._collecting_credentials = False
         self._ready = asyncio.Event()
+        self._activation_lock = asyncio.Lock()
         if prober is not None:
             self._ready.set()
         try:
@@ -130,13 +131,20 @@ class TelegramCommands:
 
     @property
     def prober(self) -> Prober:
-        assert self._prober is not None
+        if self._prober is None:
+            raise RuntimeError("AgentRouter monitoring is not active")
         return self._prober
+
+    @property
+    def _credential_setup(self) -> AgentRouterSetup:
+        if self._setup is None:
+            raise RuntimeError("AgentRouter credential setup is unavailable")
+        return self._setup
 
     async def prepare(self) -> None:
         if self.telegram.bot is None:
-            await _retry(self.telegram.get_me, "Telegram bot identity")
-        await _retry(
+            await retry_telegram(self.telegram.get_me, "Telegram bot identity")
+        await retry_telegram(
             lambda: self.telegram.configure_menu(TELEGRAM_COMMANDS),
             "Telegram command menu",
         )
@@ -146,7 +154,7 @@ class TelegramCommands:
         if self.owner_id is None or not isinstance(message, dict):
             return None
         chat, sender = message.get("chat"), message.get("from")
-        text = _plain_message_text(message)
+        text = plain_message_text(message)
         if (
             not isinstance(chat, dict)
             or chat.get("type") != "private"
@@ -222,32 +230,34 @@ class TelegramCommands:
                         self._prober.record_telegram_retry(exc)
                     raise
 
-            await _retry(send_part, "Telegram command reply")
+            await retry_telegram(send_part, "Telegram command reply")
 
     async def _activate(self) -> bool:
-        assert self._setup is not None
-        client = await self._setup.connect()
-        if client is None:
-            return False
-        try:
-            self._prober = Prober(client.settings, client, self.telegram)
-        except BaseException:
-            await client.close()
-            raise
-        self._ready.set()
-        return True
+        async with self._activation_lock:
+            if self._prober is not None:
+                return True
+            client = await self._credential_setup.connect()
+            if client is None:
+                return False
+            try:
+                self._prober = Prober(client.settings, client, self.telegram)
+            except BaseException:
+                await client.close()
+                raise
+            self._ready.set()
+            return True
 
     async def _advance_setup(self, note: str | None = None) -> None:
-        assert self._setup is not None
-        if self._setup.next_field is None:
+        setup = self._credential_setup
+        if setup.next_field is None:
             self._collecting_credentials = False
             await self._reply("⏳ Checking AgentRouter credentials…", reply_markup=SETUP_MENU)
             if await self._activate():
                 await self._reply("✅ AgentRouter credentials verified and saved. Monitoring is active.")
                 return
-        field = self._setup.next_field
+        field = setup.next_field
         self._collecting_credentials = field is not None
-        details = note or self._setup.problem
+        details = note or setup.problem
         prompt = SETUP_PROMPTS[field] if field is not None else "Choose an AgentRouter feature to retry."
         lines = ["🔑 AgentRouter Setup", ""]
         if details:
@@ -258,7 +268,7 @@ class TelegramCommands:
         if screenshot is not None:
             try:
                 photo = files("agentrouter_prober").joinpath("assets", screenshot).read_bytes()
-                await _retry(
+                await retry_telegram(
                     lambda: self.telegram.send_photo(
                         screenshot, photo, caption=text, reply_markup=SETUP_MENU
                     ),
@@ -270,14 +280,19 @@ class TelegramCommands:
         await self._reply(text, reply_markup=SETUP_MENU if field is not None else TELEGRAM_MENU)
 
     async def _submit_credential(self, text: str, message_id: object) -> None:
-        assert self._setup is not None
+        setup = self._credential_setup
         if type(message_id) is int and message_id > 0:
             try:
                 await self.telegram.delete_message(message_id)
             except ClientError:
                 LOGGER.warning("Telegram could not delete a credential message")
+                await self._reply(
+                    "Telegram could not delete your credential message. Delete it manually "
+                    "and rotate the credential if it may have been exposed.",
+                    reply_markup=SETUP_MENU,
+                )
         try:
-            self._setup.submit(text)
+            setup.submit(text)
         except ConfigurationError as exc:
             await self._advance_setup(str(exc))
         else:
@@ -522,14 +537,21 @@ class TelegramCommands:
         await self.prepare()
         offset = None
         while not stop_event.is_set():
-            updates = await _retry(
+            updates = await retry_telegram(
                 lambda: self.telegram.get_updates(offset),
                 "Telegram command listener",
             )
             for update in updates:
                 if stop_event.is_set():
                     return
-                await self.handle_update(update)
+                try:
+                    await self.handle_update(update)
+                except (ClientError, OSError) as exc:
+                    LOGGER.warning("Telegram update %s failed: %s", update["update_id"], exc)
+                    try:
+                        await self.telegram.send("That command failed. Please try again.")
+                    except ClientError:
+                        LOGGER.warning("Could not report the command failure to Telegram")
                 offset = update["update_id"] + 1
             if not updates:
                 await asyncio.sleep(0)
@@ -537,6 +559,30 @@ class TelegramCommands:
 
     async def run(self, stop_event: asyncio.Event) -> None:
         async def monitor() -> None:
+            setup = self._setup
+            delay = 1
+            while not self._ready.is_set() and setup is not None and setup.retry_after is not None:
+                wait_seconds = max(delay, setup.retry_after)
+                LOGGER.warning("AgentRouter credential validation will retry in %ss", wait_seconds)
+                try:
+                    await asyncio.wait_for(self._ready.wait(), timeout=wait_seconds)
+                except TimeoutError:
+                    if stop_event.is_set():
+                        return
+                    if setup.retry_after is not None:
+                        await self._activate()
+                        if setup.problem and setup.retry_after is None:
+                            LOGGER.warning("AgentRouter setup required. %s", setup.problem)
+                    delay = min(delay * 2, 30)
+            if self.enabled and not self._ready.is_set() and setup and setup.problem:
+                try:
+                    await self.telegram.send(
+                        f"AgentRouter monitoring is paused.\n\n{setup.problem}\n\n"
+                        "Open Status to continue setup.",
+                        reply_markup=TELEGRAM_MENU,
+                    )
+                except ClientError:
+                    LOGGER.warning("Could not send the AgentRouter setup notice to Telegram")
             await self._ready.wait()
             await self.prober.run_forever(stop_event)
 
@@ -550,6 +596,8 @@ class TelegramCommands:
                 if self._prober is not None:
                     LOGGER.info("Telegram commands require a private chat; continuing availability notifications")
                     await self.prober.run_forever(stop_event)
+                elif self._credential_setup.retry_after is not None:
+                    await monitor()
                 else:
                     LOGGER.info("Set AgentRouter credentials in the environment or run setup in a private chat")
                     await stop_event.wait()

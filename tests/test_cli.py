@@ -13,7 +13,7 @@ import pytest
 from agentrouter_prober import cli, setup as credential_setup
 from agentrouter_prober.config import Settings
 from agentrouter_prober.messages import TELEGRAM_HELP
-from agentrouter_prober.state import StateStore, health_is_fresh
+from agentrouter_prober.state import StateStore, format_datetime, health_is_fresh, utc_now
 from agentrouter_prober.telegram import CONNECTED_MESSAGE, TelegramRegistrationStore
 
 
@@ -202,6 +202,8 @@ def test_bot_collects_missing_credentials_and_keeps_valid_values_when_a_check_fa
                 data = json.loads(request.content)
                 assert data["chat_id"] == "42"
                 deleted.append(data["message_id"])
+                if data["message_id"] == 7:
+                    return httpx.Response(400, json={"ok": False})
                 return httpx.Response(200, json={"ok": True, "result": True})
             if method == "sendPhoto":
                 headers = f"Content-Type: {request.headers['content-type']}\r\nMIME-Version: 1.0\r\n\r\n"
@@ -265,6 +267,7 @@ def test_bot_collects_missing_credentials_and_keeps_valid_values_when_a_check_fa
         assert "Generate Token under System Access Token" in prompt
         assert "https://agentrouter.org/console" in prompt
     assert "credentials verified and saved" in texts
+    assert "Telegram could not delete your credential message. Delete it manually" in texts
     assert "💰 $1.00 available" in texts
     assert deleted == [7, 8, 9, 10, 12, 13]
     assert checks == ["/v1/models", "/v1/models"] and probed.is_set()
@@ -311,21 +314,56 @@ def test_setup_retries_a_model_key_rejection_temporary_failure_and_unsaved_crede
         assert await setup.connect() is None
         assert setup.next_field == "AGENTROUTER_API_KEY"
         assert "rejected the model API key" in setup.problem
+        assert setup.retry_after is None
         setup.submit("sk-test")
         assert await setup.connect() is None
         assert setup.next_field is None
         assert "Could not verify the model API key" in setup.problem
+        assert setup.retry_after == 0
         with monkeypatch.context() as patch:
             patch.setattr(credential_setup, "save_agentrouter_credentials", fail_save)
             assert await setup.connect() is None
             assert setup.next_field is None
             assert "Could not save the verified credentials" in setup.problem
+            assert setup.retry_after is None
             assert not env_path.exists()
         client = await setup.connect()
         assert client is not None and env_path.is_file()
         await client.close()
 
     asyncio.run(run())
+    assert all(client.is_closed for client in clients)
+
+
+@pytest.mark.parametrize("chat_id", ["42", "-98765"])
+def test_daemon_recovers_from_temporary_startup_validation_failure(configured_env, monkeypatch, chat_id):
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", chat_id)
+    model_statuses = iter((503, 200))
+    telegram = telegram_response([])
+    monitoring_started = False
+
+    async def handler(request):
+        if request.url.host == "telegram.test":
+            if request.url.path.endswith("/getUpdates"):
+                await asyncio.Event().wait()
+            return telegram(request)
+        if request.url.path == "/v1/models":
+            return httpx.Response(next(model_statuses), json={"data": []})
+        assert request.url.path == "/api/user/self"
+        return httpx.Response(200, json={
+            "success": True, "data": {"id": 60923, "quota": 500_000, "used_quota": 0},
+        })
+
+    async def monitor(self, stop_event):
+        nonlocal monitoring_started
+        monitoring_started = True
+        stop_event.set()
+
+    clients = install_transport(monkeypatch, handler, mock_validation=False)
+    monkeypatch.setattr(cli.Prober, "run_forever", monitor)
+    assert asyncio.run(asyncio.wait_for(cli._run(Settings.from_env(), False), timeout=5)) == 0
+    assert monitoring_started
+    assert next(model_statuses, None) is None
     assert all(client.is_closed for client in clients)
 
 
@@ -371,6 +409,13 @@ def test_polling_starts_after_registration_and_delivers_alerts(
     assert health_is_fresh(configured_env, 3600)
     assert not StateStore(configured_env).load().model("gpt-6-astra").notification_pending
     assert all(client.is_closed for client in clients)
+
+
+def test_healthcheck_rejects_missing_telegram_configuration_with_fresh_state(configured_env, monkeypatch):
+    configured_env.write_text(json.dumps({"last_successful_status_at": format_datetime(utc_now())}))
+    assert cli.main(["--healthcheck"]) == 0
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN")
+    assert cli.main(["--healthcheck"]) == 2
 
 
 @pytest.mark.parametrize("mode", [["--test-telegram"], ["--once"], []])

@@ -14,7 +14,9 @@ __pycache__
 .venv
 tests
 state.json
+state.json.corrupt-*
+.state.json.*
 telegram.json
-.telegram.json.tmp
+.telegram.json.*
 .test-tmp
 

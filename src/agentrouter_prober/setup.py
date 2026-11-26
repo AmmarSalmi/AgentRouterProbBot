@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 
-from .clients import AgentRouterClient, ClientError, CredentialRejected
+from .clients import AgentRouterClient, ClientError, CredentialRejected, TransientClientError
 from .config import (
     ACCOUNT_ID,
     AGENTROUTER_CREDENTIALS,
@@ -24,6 +24,7 @@ class AgentRouterSetup:
             DASHBOARD_TOKEN: settings.agentrouter_dashboard_token,
         }
         self.problem: str | None = None
+        self.retry_after: int | None = None
 
     @property
     def next_field(self) -> str | None:
@@ -35,9 +36,11 @@ class AgentRouterSetup:
             raise RuntimeError("AgentRouter setup has no pending field")
         self._credentials[field] = parse_agentrouter_credential(field, value)
         self.problem = None
+        self.retry_after = None
 
     async def connect(self) -> AgentRouterClient | None:
         if self.next_field is not None:
+            self.retry_after = None
             return None
         settings = replace(
             self._settings,
@@ -66,7 +69,16 @@ class AgentRouterSetup:
                     raise result
             self.problem = "\n".join(issues) or None
             if self.problem:
+                transient = [
+                    result for result in (model_check, account_check)
+                    if isinstance(result, TransientClientError)
+                ]
+                self.retry_after = (
+                    max(result.retry_after or 0 for result in transient)
+                    if len(transient) == len(issues) else None
+                )
                 return None
+            self.retry_after = None
             try:
                 save_agentrouter_credentials(settings.state_path, self._credentials)
             except OSError:

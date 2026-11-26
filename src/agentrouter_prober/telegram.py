@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -12,6 +11,7 @@ from typing import Any, TypeVar
 from .clients import TelegramBot, TelegramClient, TransientClientError
 from .config import ConfigurationError
 from .messages import TELEGRAM_MENU
+from .state import write_json_atomic
 
 
 LOGGER = logging.getLogger(__name__)
@@ -82,19 +82,13 @@ class TelegramRegistrationStore:
             ) from None
 
     def save(self, registration: TelegramRegistration) -> None:
-        temporary = self.path.with_name(f".{self.path.name}.tmp")
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary.write_text(
-                json.dumps({"version": 1, **asdict(registration)}, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            os.replace(temporary, self.path)
+            write_json_atomic(self.path, {"version": 1, **asdict(registration)})
         except OSError:
             raise ConfigurationError(f"Cannot save Telegram registration: {self.path}") from None
 
 
-async def _retry(operation: Callable[[], Awaitable[T]], action: str = "Telegram setup") -> T:
+async def retry_telegram(operation: Callable[[], Awaitable[T]], action: str = "Telegram setup") -> T:
     delay = 1
     while True:
         try:
@@ -106,7 +100,7 @@ async def _retry(operation: Callable[[], Awaitable[T]], action: str = "Telegram 
             delay = min(delay * 2, 30)
 
 
-def _plain_message_text(message: dict[str, Any]) -> str | None:
+def plain_message_text(message: dict[str, Any]) -> str | None:
     text = message.get("text")
     if not isinstance(text, str) or not NON_TEXT_MESSAGE_FIELDS.isdisjoint(message):
         return None
@@ -118,7 +112,7 @@ def _private_start(update: dict[str, Any], bot: TelegramBot) -> int | None:
     if not isinstance(message, dict):
         return None
     chat, sender = message.get("chat"), message.get("from")
-    text = _plain_message_text(message)
+    text = plain_message_text(message)
     if (
         not isinstance(chat, dict)
         or chat.get("type") != "private"
@@ -148,8 +142,8 @@ async def _finish_registration(
     client.chat_id = str(registration.chat_id)
     if registration.next_update_id is not None:
         # Acknowledge through /start, leaving later commands queued for the listener.
-        await _retry(lambda: client.get_updates(registration.next_update_id, timeout=0))
-        await _retry(lambda: client.send(CONNECTED_MESSAGE, reply_markup=TELEGRAM_MENU))
+        await retry_telegram(lambda: client.get_updates(registration.next_update_id, timeout=0))
+        await retry_telegram(lambda: client.send(CONNECTED_MESSAGE, reply_markup=TELEGRAM_MENU))
         store.save(replace(registration, next_update_id=None))
         LOGGER.info("Telegram recipient registered and saved")
 
@@ -157,7 +151,7 @@ async def _finish_registration(
 async def _resolve(client: TelegramClient, state_path: Path) -> None:
     store = TelegramRegistrationStore(state_path)
     registration = store.load()
-    bot = await _retry(client.get_me)
+    bot = await retry_telegram(client.get_me)
     if registration is not None and registration.bot_id == bot.id:
         await _finish_registration(client, store, registration)
         return
@@ -166,7 +160,7 @@ async def _resolve(client: TelegramClient, state_path: Path) -> None:
     LOGGER.info("Waiting for /start in a private chat with @%s", bot.username)
     offset = None
     while True:
-        updates = await _retry(lambda: client.get_updates(offset))
+        updates = await retry_telegram(lambda: client.get_updates(offset))
         if not updates:
             await asyncio.sleep(0)
             continue

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from math import ceil
 from typing import Any
 
 from .clients import AccountUsage, QuotaDisplay
@@ -141,10 +142,16 @@ def format_quota_amount(quota: int, display: QuotaDisplay) -> str:
     return f"{quota:,} quota"
 
 
-def probe_key_balance_message(balance: Decimal, threshold: Decimal) -> str:
+def probe_key_balance_message(remaining: int, threshold_usd: Decimal, display: QuotaDisplay) -> str:
+    quota_per_unit, display_in_currency = display
+    threshold = (
+        f"${threshold_usd:,.2f}"
+        if display_in_currency
+        else format_quota_amount(ceil(threshold_usd * Decimal(str(quota_per_unit))), display)
+    )
     return (
         "⚠️ Low probing key balance\n\n"
-        f"${balance:,.2f} left · ${threshold:,.2f} threshold"
+        f"{format_quota_amount(remaining, display)} left · {threshold} threshold"
     )
 
 

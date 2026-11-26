@@ -14,11 +14,12 @@ from urllib.parse import urlencode
 
 import httpx
 
+from . import __version__
 from .config import Settings, TelegramSettings
 from .state import utc_now
 
 
-TELEGRAM_USER_AGENT = "AgentRouterAvailabilityProber/2.0"
+TELEGRAM_USER_AGENT = f"AgentRouterAvailabilityProber/{__version__}"
 DEFAULT_QUOTA_PER_UNIT = 500_000
 
 
@@ -58,16 +59,6 @@ class ModelObservation:
     success_rate_24h: float | None = None
     ttft_p90_ms_24h: int | None = None
     avg_latency_ms: int | None = None
-
-    @property
-    def classification(self) -> str:
-        status = self.status.lower()
-        tier = self.current_tier.lower()
-        if status == "down" or tier == "bad":
-            return "unavailable"
-        if status in {"operational", "degraded"} and tier != "bad":
-            return "candidate"
-        return "unknown"
 
 
 @dataclass(frozen=True)
@@ -288,8 +279,10 @@ class AgentRouterClient:
                 },
             )
         except httpx.RequestError as exc:
-            detail = str(exc).replace(token, "[redacted]")
-            raise TransientClientError(f"{label} request failed: {detail}") from exc
+            detail = str(exc)
+            if token:
+                detail = detail.replace(token, "[redacted]")
+            raise TransientClientError(f"{label} request failed: {detail}") from None
 
         if response.status_code == 429 or response.status_code >= 500:
             raise TransientClientError(f"{label} returned HTTP {response.status_code}")
@@ -314,7 +307,7 @@ class AgentRouterClient:
                 raise CredentialRejected(auth_error)
             if not show_message:
                 raise ProtocolError(f"{label} request was unsuccessful")
-            raise ProtocolError(message.replace(token, "[redacted]"))
+            raise ProtocolError(message.replace(token, "[redacted]") if token else message)
         return payload
 
     async def quota_display_settings(self) -> QuotaDisplay:
@@ -344,11 +337,10 @@ class AgentRouterClient:
                     float(quota_per_unit),
                     display_in_currency is not False,
                 )
-        except (httpx.RequestError, ValueError):
+                return self._quota_display_cache
+        except (httpx.RequestError, OverflowError, ValueError):
             pass
-        if self._quota_display_cache is None:
-            self._quota_display_cache = (float(DEFAULT_QUOTA_PER_UNIT), True)
-        return self._quota_display_cache
+        return self._quota_display_cache or (float(DEFAULT_QUOTA_PER_UNIT), True)
 
     async def validate_model_key(self) -> None:
         try:
@@ -677,20 +669,7 @@ class AgentRouterClient:
             raise TransientClientError(
                 f"Probe for {observation.name} returned HTTP {response.status_code}"
             )
-        raise ProtocolError(
-            f"Probe for {observation.name} returned HTTP {response.status_code}: "
-            f"{message[:300]}"
-        )
-
-    async def confirm_model(
-        self, model: str | ModelObservation
-    ) -> ProbeOutcome:
-        observation = (
-            model
-            if isinstance(model, ModelObservation)
-            else ModelObservation(model, "unknown", "none", ("responses",))
-        )
-        return (await self.probe_model(observation)).outcome
+        raise ProtocolError(f"Probe for {observation.name} returned HTTP {response.status_code}")
 
 
 @dataclass(frozen=True)

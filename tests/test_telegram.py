@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 
 import httpx
 import pytest
@@ -62,10 +63,19 @@ def test_chat_id_is_optional(monkeypatch, chat_id):
     assert TelegramSettings.from_env().chat_id is None
 
 
-def test_explicit_chat_id_is_preserved(monkeypatch):
+@pytest.mark.parametrize("chat_id", ["-98765", "+42", "@example_channel"])
+def test_explicit_chat_id_is_preserved(monkeypatch, chat_id):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
-    monkeypatch.setenv("TELEGRAM_CHAT_ID", " -98765 ")
-    assert TelegramSettings.from_env().chat_id == "-98765"
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", f" {chat_id} ")
+    assert TelegramSettings.from_env().chat_id == chat_id
+
+
+@pytest.mark.parametrize("chat_id", ["typo", "0", "@bad name"])
+def test_invalid_explicit_chat_id_is_rejected(monkeypatch, chat_id):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", chat_id)
+    with pytest.raises(ConfigurationError, match="TELEGRAM_CHAT_ID"):
+        TelegramSettings.from_env()
 
 
 def test_bot_token_remains_required(monkeypatch):
@@ -230,7 +240,7 @@ def test_failed_atomic_save_preserves_previous_binding_and_sends_nothing(state_d
     def cannot_replace(source, destination):
         raise PermissionError("simulated unwritable storage")
 
-    monkeypatch.setattr(registration_module.os, "replace", cannot_replace)
+    monkeypatch.setattr(os, "replace", cannot_replace)
 
     def handler(request):
         method, data = request_data(request)

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any, Literal
+from uuid import uuid4
 
 
 UTC = timezone.utc
+LOGGER = logging.getLogger(__name__)
 CreditAlertKind = Literal["spending", "balance"]
 CREDIT_ALERT_KINDS: tuple[CreditAlertKind, ...] = ("spending", "balance")
 KeyAlertKind = Literal["spending", "balance", "expiry"]
@@ -25,10 +29,39 @@ def format_datetime(value: datetime | None) -> str | None:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
-def parse_datetime(value: str | None) -> datetime | None:
-    if not value:
+def parse_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
         return None
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    except (OverflowError, ValueError):
+        return None
+
+
+def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False,
+        ) as file:
+            temporary = Path(file.name)
+            file.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+        if hasattr(os, "O_DIRECTORY"):
+            try:
+                directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            except OSError:
+                LOGGER.warning("Could not sync the state directory at %s", path.parent)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 @dataclass
@@ -49,9 +82,6 @@ class ModelRecord:
     probe_reply: str | None = None
     probe_error: str | None = None
     notification_pending: bool = False
-    # Kept for migration from version 1 state; no longer used for scheduling.
-    confirm_failures: int = 0
-    next_confirm_at: str | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "ModelRecord":
@@ -190,9 +220,12 @@ class PersistentState:
                 alert = CreditAlert.from_dict(stored_alerts.get(kind))
                 if alert is not None:
                     credit_alerts[kind] = alert
+        stored_models = raw.get("models", {})
+        if not isinstance(stored_models, dict):
+            raise ValueError("state models are not an object")
         models = {
             name: ModelRecord.from_dict(record)
-            for name, record in raw.get("models", {}).items()
+            for name, record in stored_models.items()
             if isinstance(record, dict)
         }
         return cls(
@@ -239,29 +272,27 @@ class StateStore:
     def __init__(self, path: Path):
         self.path = path
 
-    def load(self) -> PersistentState:
-        if not self.path.exists():
-            return PersistentState()
+    def load(self, *, recover: bool = True) -> PersistentState:
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
                 raise ValueError("state root is not an object")
             return PersistentState.from_dict(raw)
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        except FileNotFoundError:
+            return PersistentState()
+        except (ValueError, TypeError):
+            if recover:
+                backup = self.path.with_name(f"{self.path.name}.corrupt-{uuid4().hex}")
+                self.path.rename(backup)
+                LOGGER.warning("Preserved unreadable state at %s and started with empty state", backup)
             return PersistentState(last_error="Existing state file was unreadable")
 
     def save(self, state: PersistentState) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_name(f".{self.path.name}.tmp")
-        temporary.write_text(
-            json.dumps(state.to_dict(), ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(temporary, self.path)
+        write_json_atomic(self.path, state.to_dict())
 
 
 def health_is_fresh(path: Path, max_age_seconds: int, now: datetime | None = None) -> bool:
-    state = StateStore(path).load()
+    state = StateStore(path).load(recover=False)
     successful_at = parse_datetime(state.last_successful_status_at)
     if successful_at is None:
         return False

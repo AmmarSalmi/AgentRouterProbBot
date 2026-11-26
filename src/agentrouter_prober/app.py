@@ -82,10 +82,6 @@ class CycleResult:
     fatal_error: bool
     notifications_sent: int
 
-    @property
-    def status_ok(self) -> bool:
-        return self.dashboard_ok
-
 
 class Prober:
     def __init__(
@@ -108,10 +104,6 @@ class Prober:
         self._cycle_lock = asyncio.Lock()
         self._poll_wakeup = asyncio.Event()
         self.telegram.send_retry_at = parse_datetime(self.state.telegram_retry_at)
-
-    async def close(self) -> None:
-        await self.agentrouter.close()
-        await self.telegram.close()
 
     @property
     def has_model_status(self) -> bool:
@@ -327,7 +319,8 @@ class Prober:
                 self.state.probe_key_alert = None
             elif alert is None or alert.pending_message is not None:
                 self.state.probe_key_alert = ProbeKeyAlert(
-                    self._probe_key_fingerprint, chat_id, probe_key_balance_message(balance, threshold)
+                    self._probe_key_fingerprint, chat_id,
+                    probe_key_balance_message(remaining, threshold, display),
                 )
         monitoring = self.key_monitoring
         if monitoring:

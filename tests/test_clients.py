@@ -158,6 +158,26 @@ def test_probe_key_balance_matches_the_configured_key_across_dashboard_pages(unl
     assert paths == ["/api/token/"] * 2
 
 
+def test_quota_display_retries_fallback_then_caches_valid_settings():
+    replies = iter((
+        httpx.Response(503),
+        httpx.Response(200, json={"data": {"quota_per_unit": 750_000, "display_in_currency": False}}),
+    ))
+
+    def handler(request):
+        assert request.url.path == "/api/status"
+        return next(replies)
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = AgentRouterClient(settings(), http)
+            assert await client.quota_display_settings() == (500_000, True)
+            assert await client.quota_display_settings() == (750_000, False)
+            assert await client.quota_display_settings() == (750_000, False)
+
+    asyncio.run(run())
+
+
 def test_usage_totals_group_by_numeric_key_across_pages_and_respect_end_boundary():
     rows = [
         {"token_id": 2, "token_name": "Current", "model_name": "alpha", "created_at": 199, "quota": 6},
@@ -310,7 +330,9 @@ def test_probe_rejects_http_success_without_model_output(body):
             )
         ) as http:
             with pytest.raises(ProtocolError):
-                await AgentRouterClient(settings(), http).confirm_model("gpt")
+                await AgentRouterClient(settings(), http).probe_model(
+                    ModelObservation("gpt", "unknown", "none", ("responses",))
+                )
 
     asyncio.run(run())
 

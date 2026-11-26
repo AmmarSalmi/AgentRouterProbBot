@@ -159,6 +159,63 @@ def test_balance_command_reads_account_without_probing_models(state_directory):
     )
 
 
+def test_command_listener_advances_after_failed_reply():
+    stop = asyncio.Event()
+    offsets = []
+
+    class BadReplyTelegram(FakeTelegram):
+        async def configure_menu(self, commands):
+            pass
+
+        async def get_updates(self, offset):
+            offsets.append(offset)
+            if offset is None:
+                return [message("/start"), {**message("/help"), "update_id": 2}]
+            stop.set()
+            return []
+
+        async def send(self, text, *, reply_markup=None):
+            if text == "🤖 AgentRouter":
+                raise ProtocolError("Telegram returned HTTP 400")
+            await super().send(text, reply_markup=reply_markup)
+
+    telegram = BadReplyTelegram()
+    asyncio.run(TelegramCommands(telegram).run_forever(stop))
+    assert offsets == [None, 3]
+    assert telegram.sent[0][0] == "That command failed. Please try again."
+    assert "Help" in telegram.sent[1][0]
+
+
+def test_failed_startup_validation_notifies_owner_once():
+    stop = asyncio.Event()
+
+    class FailedSetup:
+        problem = "AgentRouter rejected the model API key."
+        retry_after = None
+
+        async def connect(self):
+            return None
+
+    class NoticeTelegram(FakeTelegram):
+        async def configure_menu(self, commands):
+            pass
+
+        async def get_updates(self, offset):
+            await stop.wait()
+            return []
+
+        async def send(self, text, *, reply_markup=None):
+            await super().send(text, reply_markup=reply_markup)
+            stop.set()
+
+    telegram = NoticeTelegram()
+    asyncio.run(asyncio.wait_for(TelegramCommands(telegram, setup=FailedSetup()).run(stop), 2))
+    assert [text for text, _ in telegram.sent] == [
+        "AgentRouter monitoring is paused.\n\nAgentRouter rejected the model API key.\n\n"
+        "Open Status to continue setup."
+    ]
+
+
 def test_usage_alias_reports_account_errors_without_stopping_commands(state_directory):
     class FailingAgent(FakeAgent):
         async def fetch_account_usage(self):
