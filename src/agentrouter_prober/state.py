@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from errno import EACCES, EAGAIN, EWOULDBLOCK
 from hashlib import sha256
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -68,6 +71,37 @@ def write_text_atomic(path: Path, contents: str) -> None:
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def state_writer_lock(path: Path) -> Iterator[None]:
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno not in {EACCES, EAGAIN, EWOULDBLOCK}:
+                raise
+            raise OSError(
+                f"State file {path} is already in use by another prober. Stop it before starting another instance."
+            ) from None
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    finally:
+        # Keep the lock file so every process opens the same file.
+        os.close(fd)
 
 
 class TelegramContactStore:

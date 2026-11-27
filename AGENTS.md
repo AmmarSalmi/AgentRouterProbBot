@@ -13,7 +13,7 @@ Use Python 3.11 or newer.
 - `python -m pip install -e ".[test]"` installs the package in editable mode with pytest.
 - `python -m pytest tests/` runs the full suite.
 - `agentrouter-prober` starts the service with the environment variables documented in `README.md`. Set `STATE_PATH` to a writable file path for local runs. Add `--once` to run one live cycle, which can send Telegram alerts.
-- `docker compose build` builds the service image. Follow `VPS_SETUP.md` for Linux deployment.
+- `docker compose build` builds the service image. Follow [Start with Docker](README.md#start-with-docker) for Windows and Linux deployment.
 
 ## Coding Style and Naming
 

@@ -12,7 +12,7 @@ from time import monotonic
 from typing import Any, TypeVar
 
 from .clients import ClientError, TelegramBot, TelegramClient, TransientClientError
-from .config import ConfigurationError
+from .config import ConfigurationError, TelegramSettings
 from .messages import TELEGRAM_MENU
 from .state import write_text_atomic
 
@@ -39,7 +39,6 @@ T = TypeVar("T")
 class TelegramRegistration:
     bot_id: int
     chat_id: int
-    owner_user_id: int
     # Non-null until the received updates are acknowledged and setup is confirmed.
     next_update_id: int | None = None
 
@@ -81,7 +80,7 @@ class TelegramRegistrationStore:
             if offset and not re.fullmatch(r"[0-9]{1,19}", offset):
                 raise ValueError("invalid update offset")
             return TelegramRegistration(
-                bot_id=int(bot), chat_id=int(chat), owner_user_id=int(chat),
+                bot_id=int(bot), chat_id=int(chat),
                 next_update_id=int(offset) if offset else None,
             )
         except ValueError:
@@ -173,6 +172,20 @@ async def _finish_registration(
         LOGGER.info("Telegram recipient registered and saved")
 
 
+def _ownership_otp(settings: TelegramSettings) -> str:
+    otp = settings.ownership_otp
+    if otp is None or not OWNERSHIP_OTP_PATTERN.fullmatch(otp):
+        raise ConfigurationError(
+            "Set OWNERSHIP_OTP to a random 10-digit code or set TELEGRAM_CHAT_ID in .env"
+        )
+    return otp
+
+
+def validate_telegram_ownership(settings: TelegramSettings, state_path: Path) -> None:
+    if not settings.chat_id and TelegramRegistrationStore(state_path).load() is None:
+        _ownership_otp(settings)
+
+
 async def _resolve(client: TelegramClient, state_path: Path) -> None:
     store = TelegramRegistrationStore(state_path)
     registration = store.load()
@@ -183,11 +196,7 @@ async def _resolve(client: TelegramClient, state_path: Path) -> None:
             await _finish_registration(client, store, registration)
             return
         LOGGER.info("Telegram bot changed; the owner must pair again")
-    otp = client.settings.ownership_otp
-    if otp is None or not OWNERSHIP_OTP_PATTERN.fullmatch(otp):
-        raise ConfigurationError(
-            "Set OWNERSHIP_OTP to a random 10-digit code or set TELEGRAM_CHAT_ID in .env"
-        )
+    otp = _ownership_otp(client.settings)
     if bot is None:
         bot = await retry_telegram(client.get_me)
     expires_at = monotonic() + OWNERSHIP_OTP_TTL
@@ -227,7 +236,7 @@ async def _resolve(client: TelegramClient, state_path: Path) -> None:
                 status = f"Attempts remaining: {attempts_left}." if attempts_left else OWNERSHIP_OTP_LOCKED
                 await _pairing_reply(client, chat_id, f"Incorrect ownership code. {status}")
                 continue
-            registration = TelegramRegistration(bot.id, chat_id, chat_id, update["update_id"] + 1)
+            registration = TelegramRegistration(bot.id, chat_id, next_update_id=update["update_id"] + 1)
             # Persist the recipient before any reply or acknowledgment. A restart
             # during setup must resume this registration, never select another user.
             store.save(registration)

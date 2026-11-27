@@ -3,9 +3,12 @@ import json
 import os
 import signal
 import stat
+import subprocess
+import sys
 from email.parser import BytesParser
 from email.policy import default
 from importlib.resources import files
+from pathlib import Path
 
 import httpx
 import pytest
@@ -13,8 +16,13 @@ import pytest
 from agentrouter_prober import cli, setup as credential_setup
 from agentrouter_prober.config import Settings
 from agentrouter_prober.messages import TELEGRAM_HELP
-from agentrouter_prober.state import StateStore, format_datetime, health_is_fresh, utc_now
-from agentrouter_prober.telegram import CONNECTED_MESSAGE, OWNERSHIP_OTP_PROMPT, TelegramRegistrationStore
+from agentrouter_prober.state import StateStore, format_datetime, health_is_fresh, state_writer_lock, utc_now
+from agentrouter_prober.telegram import (
+    CONNECTED_MESSAGE,
+    OWNERSHIP_OTP_PROMPT,
+    TelegramRegistration,
+    TelegramRegistrationStore,
+)
 
 
 OTP = "0314159265"
@@ -161,7 +169,19 @@ def test_cli_rejects_invalid_dashboard_credentials(
     "name,mode",
     [("AGENTROUTER_BASE_URL", ["--once"]), ("TELEGRAM_API_BASE_URL", ["--test-telegram"])],
 )
-@pytest.mark.parametrize("url", ["http://127.0.0.1:8080", "https://"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8080",
+        "https://",
+        "https://example.test/gateway?region=eu",
+        "https://example.test/gateway?",
+        "https://example.test/gateway#config",
+        "https://example.test/gateway#",
+        "https://user:password@example.test/gateway",
+        "https://@example.test/gateway",
+    ],
+)
 def test_cli_rejects_invalid_https_api_endpoints(configured_env, monkeypatch, caplog, name, mode, url):
     monkeypatch.setenv(name, url)
     monkeypatch.setattr(
@@ -171,6 +191,35 @@ def test_cli_rejects_invalid_https_api_endpoints(configured_env, monkeypatch, ca
     assert cli.main(mode) == 2
     assert f"{name} must be an absolute HTTPS URL" in caplog.text
     assert not configured_env.exists()
+
+
+def test_clients_use_https_path_prefixes(configured_env, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    monkeypatch.setenv("TELEGRAM_API_BASE_URL", "https://telegram.test/gateway/")
+    monkeypatch.setenv("AGENTROUTER_BASE_URL", "https://agentrouter.test/gateway/")
+    paths = []
+
+    def respond(request):
+        paths.append(request.url.path)
+        if request.url.host == "telegram.test":
+            return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+        if request.url.path.endswith("/v1/models"):
+            return httpx.Response(200, json={"data": []})
+        return httpx.Response(200, json={
+            "success": True, "data": {"quota": 10, "used_quota": 0},
+        })
+
+    async def connect():
+        client = await credential_setup.AgentRouterSetup(Settings.from_env()).connect()
+        assert client is not None
+        await client.close()
+
+    install_transport(monkeypatch, respond, mock_validation=False)
+    asyncio.run(connect())
+    assert cli.main(["--test-telegram"]) == 0
+    assert set(paths) == {
+        "/gateway/v1/models", "/gateway/api/user/self", "/gateway/bot123:cli-test-token/sendMessage",
+    }
 
 
 def test_bot_collects_missing_credentials_and_keeps_valid_values_when_a_check_fails(
@@ -390,6 +439,59 @@ def test_daemon_recovers_from_temporary_startup_validation_failure(configured_en
     assert all(client.is_closed for client in clients)
 
 
+def test_daemon_retries_temporary_validation_failure_after_interactive_setup(
+    configured_env, monkeypatch,
+):
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    monkeypatch.delenv("AGENTROUTER_API_KEY")
+    monkeypatch.delenv("CODEX_GATEWAY_API_KEY", raising=False)
+    sent = []
+    telegram = telegram_response(sent)
+    model_statuses = iter((503, 200))
+    monitoring_started = False
+
+    async def respond(request):
+        path = request.url.path
+        if request.url.host == "telegram.test":
+            if path.endswith("/getUpdates"):
+                if "offset" in json.loads(request.content):
+                    await asyncio.Event().wait()
+                return httpx.Response(200, json={"ok": True, "result": [
+                    {
+                        "update_id": update_id,
+                        "message": {
+                            "message_id": update_id,
+                            "text": text,
+                            "chat": {"id": 42, "type": "private"},
+                            "from": {"id": 42, "is_bot": False},
+                        },
+                    } for update_id, text in ((1, "/status"), (2, "sk-test"))
+                ]})
+            if path.endswith("/deleteMessage"):
+                return httpx.Response(200, json={"ok": True, "result": True})
+            return telegram(request)
+        if path == "/v1/models":
+            return httpx.Response(next(model_statuses), json={"data": []})
+        assert path == "/api/user/self"
+        return httpx.Response(200, json={
+            "success": True, "data": {"quota": 500_000, "used_quota": 0},
+        })
+
+    async def monitor(self, stop_event):
+        nonlocal monitoring_started
+        monitoring_started = True
+        stop_event.set()
+
+    clients = install_transport(monkeypatch, respond, mock_validation=False)
+    monkeypatch.setattr(cli.Prober, "run_forever", monitor)
+    assert asyncio.run(asyncio.wait_for(cli._run(Settings.from_env(), False), timeout=5)) == 0
+    assert monitoring_started
+    assert next(model_statuses, None) is None
+    assert any("The bot will retry automatically." in item["text"] for item in sent)
+    assert Settings.from_env().agentrouter_api_key == "sk-test"
+    assert all(client.is_closed for client in clients)
+
+
 @pytest.mark.parametrize("once", [True, False])
 def test_polling_starts_after_registration_and_delivers_alerts(
     configured_env, monkeypatch, once, completed_response
@@ -442,6 +544,49 @@ def test_healthcheck_rejects_missing_telegram_configuration_with_fresh_state(con
     assert cli.main(["--healthcheck"]) == 0
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN")
     assert cli.main(["--healthcheck"]) == 2
+
+
+def test_healthcheck_validates_local_telegram_ownership(configured_env, monkeypatch):
+    configured_env.write_text(json.dumps({"last_successful_status_at": format_datetime(utc_now())}))
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kwargs: pytest.fail("Health must use local configuration only")
+    )
+    assert cli.main(["--healthcheck"]) == 0
+    monkeypatch.setenv("OWNERSHIP_OTP", "invalid")
+    assert cli.main(["--healthcheck"]) == 2
+
+    store = TelegramRegistrationStore(configured_env)
+    store.save(TelegramRegistration(123, 42))
+    assert cli.main(["--healthcheck"]) == 0
+    store.path.write_text("invalid registration", encoding="utf-8")
+    assert cli.main(["--healthcheck"]) == 2
+
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    assert cli.main(["--healthcheck"]) == 0
+
+
+def test_once_refuses_a_state_path_held_by_another_process(configured_env):
+    env = {**os.environ, "PYTHONPATH": str(Path(cli.__file__).resolve().parents[1])}
+    command = (
+        "from unittest.mock import patch\n"
+        "from agentrouter_prober.cli import main\n"
+        "with patch('httpx.AsyncClient', side_effect=AssertionError('Unexpected HTTP client')):\n"
+        "    raise SystemExit(main(['--once']))"
+    )
+    with state_writer_lock(configured_env):
+        result = subprocess.run(
+            [sys.executable, "-c", command],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    assert result.returncode == 2
+    assert "already in use by another prober" in result.stderr
+    assert not configured_env.exists()
+    with state_writer_lock(configured_env):
+        assert configured_env.with_suffix(".json.lock").is_file()
 
 
 def test_telegram_status_is_local_and_scoped_to_the_configured_bot(configured_env, monkeypatch, capsys):

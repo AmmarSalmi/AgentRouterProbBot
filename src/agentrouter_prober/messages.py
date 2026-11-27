@@ -5,7 +5,7 @@ from math import ceil
 from typing import Any
 
 from .clients import AccountUsage, QuotaDisplay
-from .state import CreditAlertKind, ModelRecord, PersistentState
+from .state import CreditAlertKind, ModelRecord, PersistentState, parse_datetime
 
 
 _BUTTON_ICONS = {
@@ -103,12 +103,22 @@ def model_probe_status(record: ModelRecord | None) -> str:
     return "unknown"
 
 
-def status_message(state: PersistentState) -> str:
+def status_message(state: PersistentState, *, discovery_failed: bool = False) -> str:
     lines = [
         f"{MODEL_STATUS_ICONS[model_probe_status(state.models.get(model))]} {model}"
         for model in state.active_models
     ]
-    return "📡 Model Status\n\n" + ("\n".join(lines) or "No models checked yet.")
+    heading = "📡 Model Status"
+    if discovery_failed:
+        heading += "\nCould not refresh the AgentRouter model list."
+        if not lines:
+            return f"{heading}\n\nNo previous results are available."
+        checked_at = parse_datetime(state.last_successful_status_at)
+        heading += (
+            f"\nShowing results from {checked_at:%Y-%m-%d %H:%M UTC}."
+            if checked_at else "\nShowing previous results."
+        )
+    return f"{heading}\n\n" + ("\n".join(lines) or "No models checked yet.")
 
 
 def format_duration(seconds: int) -> str:

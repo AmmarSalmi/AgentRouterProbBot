@@ -120,12 +120,10 @@ class TelegramCommands:
         self._prober = prober
         self._setup = setup
         self._collecting_credentials = False
-        self._ready = asyncio.Event()
+        self._activation_changed = asyncio.Event()
         self._activation_lock = asyncio.Lock()
         self._manual_probe_task: asyncio.Task[None] | None = None
         self._reporting_interrupted_probe = False
-        if prober is not None:
-            self._ready.set()
         try:
             chat_id = int(self.telegram.chat_id or "")
         except ValueError:
@@ -314,13 +312,13 @@ class TelegramCommands:
 
     async def _finish_manual_probe(self, cycle: asyncio.Task[CycleResult]) -> None:
         try:
-            await asyncio.shield(cycle)
+            result = await asyncio.shield(cycle)
             request = self.prober.state.manual_probe
             if request is not None:
                 self.prober.save_manual_probe(replace(
                     request, pending_update_id=None, last_completed_at=format_datetime(utc_now()),
                 ))
-            await self._reply(status_message(self.prober.state))
+            await self._reply(status_message(self.prober.state, discovery_failed=not result.dashboard_ok))
         except (ClientError, OSError) as exc:
             LOGGER.warning("Could not finish the manual probe: %s", exc)
             try:
@@ -328,11 +326,17 @@ class TelegramCommands:
             except ClientError:
                 LOGGER.warning("Could not report the probe failure to Telegram")
 
-    async def _activate(self) -> bool:
+    async def _activate(self, *, automatic_retry: bool = False) -> bool:
         async with self._activation_lock:
             if self._prober is not None:
                 return True
-            client = await self._credential_setup.connect()
+            setup = self._credential_setup
+            # An interactive check may have changed the retry schedule while we waited for the lock.
+            if automatic_retry and (self._activation_changed.is_set() or setup.retry_after is None):
+                return False
+            client = await setup.connect()
+            if not automatic_retry:
+                self._activation_changed.set()
             if client is None:
                 return False
             try:
@@ -340,8 +344,18 @@ class TelegramCommands:
             except BaseException:
                 await client.close()
                 raise
-            self._ready.set()
             return True
+
+    async def _report_setup_problem(self, problem: str) -> None:
+        if self.enabled:
+            try:
+                await self.telegram.send(
+                    f"AgentRouter monitoring is paused.\n\n{problem}\n\n"
+                    "Open Status to continue setup.",
+                    reply_markup=TELEGRAM_MENU,
+                )
+            except ClientError:
+                LOGGER.warning("Could not send the AgentRouter setup notice to Telegram")
 
     async def _advance_setup(self, note: str | None = None) -> None:
         setup = self._credential_setup
@@ -354,7 +368,12 @@ class TelegramCommands:
         field = setup.next_field
         self._collecting_credentials = field is not None
         details = note or setup.problem
-        prompt = SETUP_PROMPTS[field] if field is not None else "Choose an AgentRouter feature to retry."
+        if field is not None:
+            prompt = SETUP_PROMPTS[field]
+        elif setup.retry_after is not None:
+            prompt = "The bot will retry automatically."
+        else:
+            prompt = "Choose an AgentRouter feature to retry."
         lines = ["🔑 AgentRouter Setup", ""]
         if details:
             lines.extend((details, ""))
@@ -655,32 +674,36 @@ class TelegramCommands:
     async def run(self, stop_event: asyncio.Event) -> None:
         async def monitor() -> None:
             setup = self._setup
+            if self._prober is None and setup and setup.problem and setup.retry_after is None:
+                await self._report_setup_problem(setup.problem)
             delay = 1
-            while not self._ready.is_set() and setup is not None and setup.retry_after is not None:
+            while self._prober is None and not stop_event.is_set():
+                self._activation_changed.clear()
+                if setup is None or setup.retry_after is None:
+                    if not self.enabled:
+                        await stop_event.wait()
+                        return
+                    await self._activation_changed.wait()
+                    delay = 1
+                    continue
                 wait_seconds = max(delay, setup.retry_after)
                 LOGGER.warning("AgentRouter credential validation will retry in %ss", wait_seconds)
                 try:
-                    await asyncio.wait_for(self._ready.wait(), timeout=wait_seconds)
+                    async with asyncio.timeout(wait_seconds):
+                        await self._activation_changed.wait()
                 except TimeoutError:
                     if stop_event.is_set():
                         return
-                    if setup.retry_after is not None:
-                        await self._activate()
-                        if setup.problem and setup.retry_after is None:
-                            LOGGER.warning("AgentRouter setup required. %s", setup.problem)
+                    await self._activate(automatic_retry=True)
+                    if not self._activation_changed.is_set() and setup.problem and setup.retry_after is None:
+                        LOGGER.warning("AgentRouter setup required. %s", setup.problem)
+                        await self._report_setup_problem(setup.problem)
                     delay = min(delay * 2, 30)
-            if self.enabled and not self._ready.is_set() and setup and setup.problem:
-                try:
-                    await self.telegram.send(
-                        f"AgentRouter monitoring is paused.\n\n{setup.problem}\n\n"
-                        "Open Status to continue setup.",
-                        reply_markup=TELEGRAM_MENU,
-                    )
-                except ClientError:
-                    LOGGER.warning("Could not send the AgentRouter setup notice to Telegram")
-            await self._ready.wait()
-            await self._report_interrupted_probe()
-            await self.prober.run_forever(stop_event)
+                else:
+                    delay = 1
+            if not stop_event.is_set():
+                await self._report_interrupted_probe()
+                await self.prober.run_forever(stop_event)
 
         try:
             if self._prober is None:

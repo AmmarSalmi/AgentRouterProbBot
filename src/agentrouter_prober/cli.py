@@ -9,7 +9,6 @@ import sys
 import time
 from collections.abc import Coroutine
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Any
 
 from .app import Prober
@@ -20,10 +19,10 @@ from .clients import (
     TelegramClient,
     TransientClientError,
 )
-from .config import ConfigurationError, Settings, TelegramSettings
+from .config import ConfigurationError, Settings, TelegramSettings, state_path_from_env
 from .setup import AgentRouterSetup
-from .state import TelegramContactStore, health_is_fresh, utc_now
-from .telegram import resolve_telegram_chat
+from .state import TelegramContactStore, health_is_fresh, state_writer_lock, utc_now
+from .telegram import resolve_telegram_chat, validate_telegram_ownership
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -111,7 +110,7 @@ async def _run_until_stopped(
 
 async def _test_telegram() -> int:
     settings = TelegramSettings.from_env()
-    path = Path(os.getenv("STATE_PATH", "/data/state.json"))
+    path = state_path_from_env()
     client = TelegramClient(settings, state_path=path)
     stop_event = asyncio.Event()
 
@@ -165,6 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.healthcheck:
             settings = Settings.from_env()
+            validate_telegram_ownership(settings.telegram, settings.state_path)
             if not (
                 settings.agentrouter_api_key
                 and settings.agentrouter_user_id
@@ -176,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(_test_telegram())
         if args.telegram_status:
             settings = TelegramSettings.from_env()
-            path = Path(os.getenv("STATE_PATH", "/data/state.json"))
+            path = state_path_from_env()
             last_contact = TelegramContactStore(path, settings.api_base_url, settings.bot_token).load()
             if last_contact is None:
                 print("No successful Telegram contact has been recorded for this bot.")
@@ -184,7 +184,8 @@ def main(argv: list[str] | None = None) -> int:
             age = max(0, int((utc_now() - last_contact).total_seconds()))
             print(f"Last successful Telegram contact {last_contact.isoformat()} ({age}s ago).")
             return 0
-        return asyncio.run(_run(Settings.from_env(require_agentrouter=args.once), args.once))
+        with state_writer_lock(state_path_from_env()):
+            return asyncio.run(_run(Settings.from_env(require_agentrouter=args.once), args.once))
     except ConfigurationError as exc:
         logging.getLogger(__name__).error("Configuration error: %s", exc)
         return 2

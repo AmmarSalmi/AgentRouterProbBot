@@ -137,7 +137,7 @@ def test_only_the_private_chat_with_the_code_wins_and_survives_restart_and_token
             client = TelegramClient(settings(), timeout_seconds=1, http_client=http)
             assert await resolve_telegram_chat(client, path, asyncio.Event())
             await client.send("Availability alert")
-            assert store.load() == TelegramRegistration(123, 42, 42)
+            assert store.load() == TelegramRegistration(123, 42)
             before_restart = len(requests)
             restarted = TelegramClient(settings(token="123:rotated-token", ownership_otp=None), http_client=http)
             assert await resolve_telegram_chat(restarted, path, asyncio.Event())
@@ -292,7 +292,7 @@ def test_start_can_retry_after_the_ownership_prompt_fails(state_directory):
 
     asyncio.run(run())
     assert sent == [OWNERSHIP_OTP_PROMPT.format(attempts=10)] * 2 + [CONNECTED_MESSAGE]
-    assert TelegramRegistrationStore(path).load() == TelegramRegistration(123, 42, 42)
+    assert TelegramRegistrationStore(path).load() == TelegramRegistration(123, 42)
 
 
 def test_explicit_chat_bypasses_identity_polling_and_saved_registration(state_directory):
@@ -321,7 +321,7 @@ def test_explicit_chat_bypasses_identity_polling_and_saved_registration(state_di
 def test_different_bot_requires_new_registration(state_directory):
     path = state_directory / "state.json"
     store = TelegramRegistrationStore(path)
-    store.save(TelegramRegistration(100, 50, 50))
+    store.save(TelegramRegistration(100, 50))
     sent = []
 
     def handler(request):
@@ -340,7 +340,7 @@ def test_different_bot_requires_new_registration(state_directory):
 
     asyncio.run(run())
     assert sent == ["60", "60"]
-    assert store.load() == TelegramRegistration(200, 60, 60)
+    assert store.load() == TelegramRegistration(200, 60)
 
 
 @pytest.mark.parametrize("content", [
@@ -371,7 +371,7 @@ def test_corrupt_registration_fails_without_reopening_setup(state_directory, con
 def test_clearing_the_saved_chat_id_reopens_pairing(state_directory, capsys):
     path = state_directory / "state.json"
     store = TelegramRegistrationStore(path)
-    store.save(TelegramRegistration(123, 42, 42))
+    store.save(TelegramRegistration(123, 42))
     store.path.write_text(store.path.read_text().replace("TELEGRAM_CHAT_ID=42", "TELEGRAM_CHAT_ID="))
     (state_directory / "telegram.json").write_text('{"bot_id":123,"chat_id":42}')
 
@@ -392,7 +392,7 @@ def test_clearing_the_saved_chat_id_reopens_pairing(state_directory, capsys):
 
     asyncio.run(run())
     assert store.path == state_directory / "ownership" / ".env"
-    assert store.load() == TelegramRegistration(123, 99, 99)
+    assert store.load() == TelegramRegistration(123, 99)
     assert OTP not in capsys.readouterr().out
 
 
@@ -434,7 +434,7 @@ def test_expired_code_cannot_claim_ownership(state_directory, monkeypatch):
 def test_failed_atomic_save_preserves_previous_binding_and_sends_nothing(state_directory, monkeypatch):
     path = state_directory / "state.json"
     store = TelegramRegistrationStore(path)
-    previous = TelegramRegistration(100, 50, 50)
+    previous = TelegramRegistration(100, 50)
     store.save(previous)
 
     def cannot_replace(source, destination):
@@ -491,7 +491,7 @@ def test_interrupted_registration_resumes_with_the_same_sender(state_directory):
             await asyncio.wait_for(acknowledgement_started.wait(), 1)
             stop.set()
             assert not await asyncio.wait_for(task, 1)
-        assert store.load() == TelegramRegistration(123, 42, 42, 13)
+        assert store.load() == TelegramRegistration(123, 42, next_update_id=13)
 
         def restarted_handler(request):
             method, data = request_data(request)
@@ -510,14 +510,14 @@ def test_interrupted_registration_resumes_with_the_same_sender(state_directory):
 
     asyncio.run(run())
     assert sent == ["42"]
-    assert store.load() == TelegramRegistration(123, 42, 42)
+    assert store.load() == TelegramRegistration(123, 42)
 
 
 def test_setup_retries_use_capped_backoff_and_respect_retry_after(state_directory, monkeypatch):
     waits = []
     attempts = 0
     store = TelegramRegistrationStore(state_directory / "state.json")
-    store.save(TelegramRegistration(123, 42, 42))
+    store.save(TelegramRegistration(123, 42))
 
     async def record_sleep(delay):
         waits.append(delay)

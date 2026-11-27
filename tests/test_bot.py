@@ -148,6 +148,28 @@ def test_probe_now_forces_a_new_complete_cycle(state_directory):
     )
 
 
+def test_probe_now_marks_previous_results_when_discovery_fails(state_directory, monkeypatch):
+    _, agent, telegram, commands = setup(state_directory)
+
+    async def fail_discovery():
+        raise ProtocolError("Model-status request failed")
+
+    async def run():
+        await commands.handle_update(message("Status"))
+        last_checked = commands.prober.state.last_successful_status_at[:16].replace("T", " ")
+        monkeypatch.setattr(agent, "fetch_model_status", fail_discovery)
+        await commands.handle_update(message("Probe Now"))
+        await commands._manual_probe_task
+        return last_checked
+
+    last_checked = asyncio.run(run())
+    assert agent.probed == list(agent.observations)
+    reply = telegram.sent[-1][0]
+    assert "Could not refresh the AgentRouter model list." in reply
+    assert f"Showing results from {last_checked} UTC." in reply
+    assert "✅ gpt-6.1-sol" in reply
+
+
 def test_probe_now_joins_active_sweep_and_consumes_cooldown_updates(state_directory, monkeypatch):
     settings, agent, telegram, commands = setup(state_directory)
     clock = [utc_now()]

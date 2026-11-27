@@ -478,7 +478,6 @@ class Prober:
     async def _probe_one(
         self,
         observation: ModelObservation,
-        cycle_time: datetime,
         semaphore: asyncio.Semaphore,
     ) -> tuple[str, ModelProbe | Exception]:
         try:
@@ -517,7 +516,7 @@ class Prober:
         semaphore = asyncio.Semaphore(self.settings.probe_concurrency)
         results = await asyncio.gather(
             *(
-                self._probe_one(observation, cycle_time, semaphore)
+                self._probe_one(observation, semaphore)
                 for observation in observations.values()
             )
         )

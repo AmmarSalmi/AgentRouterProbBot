@@ -6,9 +6,10 @@ import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 
 import httpx
+
+from .state import write_text_atomic
 
 
 MODEL_KEY = "AGENTROUTER_API_KEY"
@@ -103,32 +104,31 @@ def load_agentrouter_credentials(state_path: Path, *, required: bool = False) ->
 
 
 def save_agentrouter_credentials(state_path: Path, credentials: dict[str, str]) -> None:
-    path = _agentrouter_env_path(state_path)
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temporary = None
-    try:
-        # NamedTemporaryFile creates the secret file with mode 0600 on POSIX.
-        with NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, prefix=".env.", delete=False
-        ) as file:
-            temporary = Path(file.name)
-            for name in AGENTROUTER_CREDENTIALS:
-                file.write(f"{name}={json.dumps(credentials[name])}\n")
-        os.replace(temporary, path)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+    contents = "".join(f"{name}={json.dumps(credentials[name])}\n" for name in AGENTROUTER_CREDENTIALS)
+    write_text_atomic(_agentrouter_env_path(state_path), contents)
 
 
 def _https_url(name: str, default: str) -> str:
     value = os.getenv(name, default).strip().rstrip("/")
+    error = f"{name} must be an absolute HTTPS URL without user information, a query, or a fragment"
     try:
         parsed = httpx.URL(value)
     except httpx.InvalidURL:
-        raise ConfigurationError(f"{name} must be an absolute HTTPS URL") from None
-    if parsed.scheme != "https" or not parsed.is_absolute_url:
-        raise ConfigurationError(f"{name} must be an absolute HTTPS URL")
+        raise ConfigurationError(error) from None
+    authority = value.partition("://")[2].partition("/")[0]
+    if (
+        parsed.scheme != "https" or not parsed.is_absolute_url
+        or "@" in authority or "?" in value or "#" in value
+    ):
+        raise ConfigurationError(error)
     return value
+
+
+def state_path_from_env() -> Path:
+    path = Path(os.getenv("STATE_PATH", "/data/state.json"))
+    if not path.name:
+        raise ConfigurationError("STATE_PATH must name a file")
+    return path
 
 
 @dataclass(frozen=True)
@@ -192,7 +192,7 @@ class Settings:
             raise ConfigurationError(threshold_error)
         probe_key_id = os.getenv("AGENTROUTER_PROBE_KEY_ID", "").strip()
 
-        state_path = Path(os.getenv("STATE_PATH", "/data/state.json"))
+        state_path = state_path_from_env()
         credentials = load_agentrouter_credentials(state_path, required=require_agentrouter)
         return cls(
             agentrouter_base_url=_https_url(
