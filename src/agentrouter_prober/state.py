@@ -41,6 +41,10 @@ def parse_datetime(value: object) -> datetime | None:
 
 
 def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+    write_text_atomic(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+def write_text_atomic(path: Path, contents: str) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = None
     try:
@@ -48,7 +52,7 @@ def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
             mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False,
         ) as file:
             temporary = Path(file.name)
-            file.write(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+            file.write(contents)
             file.flush()
             os.fsync(file.fileno())
         os.replace(temporary, path)

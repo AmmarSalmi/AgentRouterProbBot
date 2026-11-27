@@ -844,12 +844,12 @@ class TelegramClient:
             raise ProtocolError("Telegram did not delete the message")
 
     async def send(
-        self, text: str, *, reply_markup: dict[str, Any] | None = None
+        self, text: str, *, reply_markup: dict[str, Any] | None = None, chat_id: str | None = None
     ) -> Any:
         data: dict[str, Any] = {"text": text, "disable_web_page_preview": True}
         if reply_markup is not None:
             data["reply_markup"] = reply_markup
-        return await self._send("sendMessage", data)
+        return await self._send("sendMessage", data, chat_id=chat_id)
 
     async def send_photo(
         self, filename: str, png: bytes, *, caption: str, reply_markup: dict[str, Any] | None = None
@@ -860,9 +860,11 @@ class TelegramClient:
         return await self._send("sendPhoto", data, photo=(filename, png))
 
     async def _send(
-        self, method: str, data: dict[str, Any], *, photo: tuple[str, bytes] | None = None
+        self, method: str, data: dict[str, Any], *,
+        photo: tuple[str, bytes] | None = None, chat_id: str | None = None,
     ) -> Any:
-        if not self.chat_id:
+        destination = self.chat_id if chat_id is None else chat_id
+        if not destination:
             raise ProtocolError("Telegram chat is not registered yet")
         async with self._send_lock:
             if self.send_retry_at is not None:
@@ -873,7 +875,7 @@ class TelegramClient:
                     )
             self.send_retry_at = None
             try:
-                return await self._request(method, {"chat_id": self.chat_id, **data}, photo=photo)
+                return await self._request(method, {"chat_id": destination, **data}, photo=photo)
             except TransientClientError as exc:
                 if exc.retry_after is not None:
                     self.send_retry_at = utc_now() + timedelta(seconds=exc.retry_after)

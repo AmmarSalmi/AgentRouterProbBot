@@ -5,7 +5,7 @@ A Telegram bot that discovers the live AgentRouter model list from
 model through its advertised API. It reports model availability, account
 balance, and total consumption.
 
-For a Linux VPS, follow the [VPS setup guide](VPS_SETUP.md).
+[Docker setup for Windows and Linux](#start-with-docker)
 
 By default, a full discovery and probe cycle runs every 15 minutes, with at most
 two model requests in parallel and a 32-token output limit per request. Model
@@ -41,13 +41,38 @@ Token**, select **Generate Token** and copy the raw token for
 
 ![AgentRouter Security Settings showing the Generate Token button for the System Access Token](src/agentrouter_prober/assets/agentrouter-dashboard-token.png)
 
+### Pair your Telegram account
+
+Leave `TELEGRAM_CHAT_ID` blank in the project `.env` and set `OWNERSHIP_OTP`
+to a private, random 10-digit code you choose. Start the bot, send `/start`
+in a private chat, and reply with the code from `.env`. After the bot connects
+to Telegram, you have 10 minutes to use the code. If the window expires,
+`docker compose restart prober` opens a new window with the configured code.
+
+Pairing allows 10 incorrect submissions by default, shared across all chats
+that start pairing. The bot shows the remaining attempts in its prompt and
+after every incorrect submission. Once the limit is reached, run
+`docker compose restart prober` to reset it. To change the limit, set
+`OWNERSHIP_OTP_MAX_ATTEMPTS` to a positive integer in the project `.env` and
+recreate the container with `docker compose up -d --force-recreate prober`.
+
+The bot saves `TELEGRAM_CHAT_ID` to `data/ownership/.env` using the existing
+data mount. The saved owner survives container restarts and rebuilds. You can
+also enter your numeric private chat ID in the project `.env` to skip pairing.
+Double-check it before recreating the container. A valid ID for somebody else's
+private chat assigns ownership to that person. OTP pairing avoids that risk
+by verifying the Telegram account that replies. [Transfer ownership](#transfer-ownership-to-another-telegram-account)
+
+For a private bot, keep access owner-only. The bot restricts commands and
+account information to its configured or paired owner. As a second layer, use
+`/setjoingroups` in `@BotFather` to disable group joins if you only use a private
+chat. Telegram's group privacy setting controls group messages, and private
+messages can still reach the bot. [Telegram bot settings](https://core.telegram.org/bots/features#edit-settings)
+
 ### Enter credentials in Telegram
 
-Leave the AgentRouter values blank in the repository’s `.env` and start the
-bot. If `TELEGRAM_CHAT_ID` is blank, the first person to send `/start` in the
-bot’s private chat becomes its saved recipient. A configured chat ID skips
-registration. If you prefill AgentRouter credentials, set `TELEGRAM_CHAT_ID` to
-your private chat ID before starting the bot so another user cannot claim it.
+Leave the AgentRouter values blank in the project `.env` and pair your account
+before opening an AgentRouter feature.
 
 In the registered private chat, tap **Status**, **Balance**, or any other
 AgentRouter feature. The bot prompts for missing credentials one at a time,
@@ -91,25 +116,53 @@ The bot saves the verified set to `credentials/.env` beside `STATE_PATH`, at
 `/data/credentials/.env` in Docker. Saved credentials take precedence over
 environment values and are checked again on startup.
 
+To refresh the dashboard token with Compose, edit `AGENTROUTER_DASHBOARD_TOKEN`
+in `data/credentials/.env`. If the bot has yet to save credentials, edit the
+project `.env`. Apply the change with `docker compose up -d --force-recreate prober`.
+
 ## Start with Docker
 
-The shared `compose.yaml` defaults to `.env` in the repository directory on
-Windows and Linux. For a new install, copy `.env.example` to `.env` and fill in
-the Telegram bot token. If you already have `.env.vps`, rename it to `.env` or
-copy its settings into your existing `.env`.
+Use Docker Compose V2 on Windows or Linux and run the commands from the
+repository directory. For a new install, copy `.env.example` to `.env` and
+fill in `TELEGRAM_BOT_TOKEN`. If you already have `.env.vps`, rename it to
+`.env` or copy its settings into your existing `.env`.
 
-Prepare a writable `data/` directory, then run these commands from the
-repository directory. [VPS setup](VPS_SETUP.md#2-set-linux-permissions-and-credentials)
+### Prepare the data directory
+
+Compose mounts the `data/` directory next to `compose.yaml`. Create it before
+starting the service. On a Linux host using Docker Engine without user ID
+remapping, prepare a new directory for the Compose service's UID/GID
+`10001:10001` and restrict access to `.env`.
 
 ```sh
-docker compose up -d --build
-docker compose logs -f prober
+sudo install -d -m 700 -o 10001 -g 10001 data
+chmod 600 .env
 ```
 
-Open the bot and press Start, then choose a feature to set up AgentRouter. A
-queued `/start` works. Stop registration or active requests with Ctrl+C or
-`docker compose stop`. Shutdown saves current state and pending alerts before
-closing the HTTP clients.
+For an existing installation, check the service's write access before changing
+directory ownership. Standalone Docker containers run as UID/GID `999:999` by
+default. Run Compose with `sudo` on Linux if your Docker installation requires it.
+
+### Start the service
+
+Set `OWNERSHIP_OTP` or `TELEGRAM_CHAT_ID` in `.env`, then build and start the
+service. [Telegram setup](#pair-your-telegram-account)
+
+```sh
+docker compose config --quiet
+docker compose up -d --build
+docker compose ps
+```
+
+Compose builds require either `OWNERSHIP_OTP` or `TELEGRAM_CHAT_ID` in the
+project `.env`. For future builds, you can leave the OTP field set or copy the
+verified chat ID from `data/ownership/.env` into the project `.env` and clear
+the code. If you use an alternate `ENV_FILE`, pass the same path to
+`docker compose --env-file` so Compose uses those settings for the build check.
+
+Pair your account using the code you set in `.env`, then choose a feature to
+set up AgentRouter. Use `docker compose stop` to stop the service. Shutdown
+saves current state and pending alerts before closing the HTTP clients.
 
 `docker compose run --rm prober --test-telegram` sends a test message using
 the Telegram configuration alone. `docker compose run --rm prober --once`
@@ -118,7 +171,7 @@ registration and validation. It exits non-zero if validation, the model status
 read, or an authentication or protocol check fails.
 
 Compose mounts `data/` at `/data` in the container. This directory preserves
-`state.json`, `telegram.json`, and `credentials/.env` across restarts and
+`state.json`, `ownership/.env`, and `credentials/.env` across restarts and
 container recreation.
 
 ## Run directly on Windows
@@ -126,6 +179,7 @@ container recreation.
 ```powershell
 pip install -e ".[test]"
 $env:TELEGRAM_BOT_TOKEN = "123456789:replace-me"
+$env:OWNERSHIP_OTP = Read-Host "Enter a random 10-digit ownership code"
 $env:STATE_PATH = "$PWD\data\state.json"
 agentrouter-prober
 ```
@@ -227,23 +281,58 @@ the existing Telegram retry handling.
 ## Registration
 
 Registration is tied to the bot's numeric identity, so rotating its token keeps
-the recipient. Configuring a different bot requires a new `/start`. Run one
+the paired recipient. Before configuring a different bot, set a fresh
+`OWNERSHIP_OTP` in the project `.env` if you want to pair in Telegram. Run one
 update listener per bot; a webhook or another polling instance causes Telegram
 conflicts. Temporary connection failures use capped retry delays and honor
 Telegram's requested rate-limit delay.
 
-To choose another recipient, stop the service, remove its Telegram registration,
-and restart with `TELEGRAM_CHAT_ID` blank:
+### Transfer ownership to another Telegram account
 
-```sh
-docker compose stop prober
-docker compose run --rm --entrypoint python prober -c "from pathlib import Path; import os; Path(os.getenv('STATE_PATH', '/data/state.json')).with_name('telegram.json').unlink(missing_ok=True)"
-docker compose up -d prober
-```
+The new owner will be able to use the AgentRouter features configured on this
+bot. Run these steps from the directory containing `compose.yaml`.
 
-Then send `/start` from the intended private chat. With a custom `STATE_PATH`,
-registration is stored as `telegram.json` in the same directory. Unreadable or
-corrupt registration produces an error.
+1. Stop the bot.
+
+   ```sh
+   docker compose stop prober
+   ```
+
+2. If `data/ownership/.env` exists, edit its `TELEGRAM_CHAT_ID` line so it reads
+   `TELEGRAM_CHAT_ID=`. Leave the other lines as they are. On a Linux VPS, use
+   `sudo nano data/ownership/.env` if the file requires elevated permissions.
+
+3. In the project `.env` next to `compose.yaml`, clear `TELEGRAM_CHAT_ID` as
+   well. Replace the placeholder below with a fresh, private, random 10-digit
+   code. The project chat ID takes precedence over the saved chat ID when set.
+
+   ```dotenv
+   TELEGRAM_CHAT_ID=
+   OWNERSHIP_OTP=REPLACE_WITH_YOUR_CODE
+   ```
+
+4. Recreate the container so Compose loads the new values.
+
+   ```sh
+   docker compose up -d --build --force-recreate prober
+   ```
+
+5. From the **new Telegram account**, open a private chat with the bot, send
+   `/start`, and reply with the code you set in `.env`. The bot saves the new
+   chat ID in `data/ownership/.env` and replies **Connected. Choose an action
+   to get started.**
+
+If the 10-minute pairing window expires or the attempt count reaches zero,
+run `docker compose restart prober`, then send `/start` again from the new
+account. The bot uses the code already set in `.env`. [Pairing limits](#pair-your-telegram-account)
+
+If you already have the new owner's verified numeric chat ID, you can enter it
+in the project `.env` in step 3 and finish after recreating the container.
+
+With a custom `STATE_PATH`, the paired chat is saved under `ownership/.env`
+beside the state file. Installations upgrading from `telegram.json` need to pair
+once or set an explicit `TELEGRAM_CHAT_ID`. Unreadable or corrupt pairing files
+produce an error.
 
 ## Availability behavior
 
@@ -274,7 +363,9 @@ corrupt registration produces an error.
 | `AGENTROUTER_BASE_URL` | `https://agentrouter.org` | Status and model API host |
 | `AGENTROUTER_API_KEY` | empty | Model key for probing. Can be entered through Telegram setup. |
 | `AGENTROUTER_PROBE_KEY_ID` | empty | Optional positive dashboard key ID for the probing-key quota warning |
-| `TELEGRAM_CHAT_ID` | empty | Numeric chat ID or `@username` for a channel. Leave blank to register via Start. |
+| `TELEGRAM_CHAT_ID` | empty | Numeric chat ID or `@username` for a channel. Leave blank to pair in private. |
+| `OWNERSHIP_OTP` | empty | Private, random 10-digit pairing code. Set it when pairing a new chat. |
+| `OWNERSHIP_OTP_MAX_ATTEMPTS` | `10` | Total incorrect pairing submissions allowed across all chats before a restart is required. |
 | `TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | Telegram API host |
 | `AGENTROUTER_DASHBOARD_TOKEN` | empty | Dashboard access token for balance, model discovery, API key metadata, and usage logs |
 | `AGENTROUTER_USER_ID` | empty | Positive account ID paired with the dashboard token |
@@ -306,6 +397,18 @@ The bot refreshes the timestamp at most once a minute. For a group or channel
 destination, it advances when the bot sends a notification. This signal is
 independent of Docker health.
 
+## Troubleshooting
+
+Run `docker compose logs --tail=80 prober` to inspect startup errors.
+
+| Message | Action |
+| --- | --- |
+| `bind source path does not exist` | Create `data` next to `compose.yaml`. |
+| Permission error saving state | Check that the Compose service can write to `data`. See [data directory permissions](#prepare-the-data-directory). |
+| `AgentRouter rejected the dashboard token and account ID pair` | Send the matching ID and raw dashboard token in the bot's setup prompts. |
+| Browser verification instead of model status | Check whether AgentRouter allows API requests from the host. |
+| Telegram webhook or polling conflict | Stop other update listeners using the same Telegram token. |
+
 ## Tests
 
 ```sh
@@ -314,3 +417,27 @@ pytest tests/
 ```
 
 The tests run offline with mock HTTP transports.
+
+## Update Docker image and dependency pins
+
+Review the pins monthly and refresh them sooner for security updates. Use
+the multi-platform digest reported by
+`docker buildx imagetools inspect docker.io/library/python:3.13-slim` in
+`Dockerfile` so the same pin works on amd64 and arm64.
+
+In a Python 3.13 development environment with `pip-tools` and the test
+dependencies installed, refresh the hashed build and runtime requirements
+together.
+
+```sh
+python -m piptools compile --upgrade --all-build-deps --allow-unsafe \
+  --generate-hashes --strip-extras --no-emit-index-url \
+  --pip-args='--only-binary=:all:' --output-file requirements-docker.txt pyproject.toml
+python -m pip install --require-hashes --only-binary=:all: -r requirements-docker.txt
+python -m pip install --no-deps --no-build-isolation -e .
+python -m pytest tests/
+docker compose build
+```
+
+Review and commit the new digest and lock file together after the offline
+suite and image build pass.

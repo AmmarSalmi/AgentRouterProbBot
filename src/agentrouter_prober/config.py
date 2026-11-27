@@ -14,6 +14,7 @@ MODEL_KEY = "AGENTROUTER_API_KEY"
 ACCOUNT_ID = "AGENTROUTER_USER_ID"
 DASHBOARD_TOKEN = "AGENTROUTER_DASHBOARD_TOKEN"
 AGENTROUTER_CREDENTIALS = (MODEL_KEY, ACCOUNT_ID, DASHBOARD_TOKEN)
+DEFAULT_OWNERSHIP_OTP_MAX_ATTEMPTS = 10
 
 
 class ConfigurationError(ValueError):
@@ -131,6 +132,8 @@ class TelegramSettings:
     bot_token: str = field(repr=False)
     chat_id: str | None = None
     api_base_url: str = "https://api.telegram.org"
+    ownership_otp: str | None = field(default=None, repr=False)
+    ownership_otp_max_attempts: int = DEFAULT_OWNERSHIP_OTP_MAX_ATTEMPTS
 
     @classmethod
     def from_env(cls) -> "TelegramSettings":
@@ -143,6 +146,10 @@ class TelegramSettings:
             bot_token=_required_any("TELEGRAM_BOT_TOKEN"),
             chat_id=chat_id,
             api_base_url=_url("TELEGRAM_API_BASE_URL", "https://api.telegram.org"),
+            ownership_otp=os.getenv("OWNERSHIP_OTP", "").strip() or None,
+            ownership_otp_max_attempts=_positive_int(
+                "OWNERSHIP_OTP_MAX_ATTEMPTS", DEFAULT_OWNERSHIP_OTP_MAX_ATTEMPTS
+            ),
         )
 
 

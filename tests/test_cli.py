@@ -14,13 +14,18 @@ from agentrouter_prober import cli, setup as credential_setup
 from agentrouter_prober.config import Settings
 from agentrouter_prober.messages import TELEGRAM_HELP
 from agentrouter_prober.state import StateStore, format_datetime, health_is_fresh, utc_now
-from agentrouter_prober.telegram import CONNECTED_MESSAGE, TelegramRegistrationStore
+from agentrouter_prober.telegram import CONNECTED_MESSAGE, OWNERSHIP_OTP_PROMPT, TelegramRegistrationStore
+
+
+OTP = "0314159265"
 
 
 @pytest.fixture
 def configured_env(monkeypatch, state_directory):
     values = {
         "TELEGRAM_BOT_TOKEN": "123:cli-test-token",
+        "OWNERSHIP_OTP": OTP,
+        "OWNERSHIP_OTP_MAX_ATTEMPTS": "10",
         "TELEGRAM_API_BASE_URL": "https://telegram.test",
         "TELEGRAM_CHAT_ID": "",
         "AGENTROUTER_API_KEY": "sk-test",
@@ -88,14 +93,14 @@ def telegram_response(sent):
             result = True
         elif method == "getUpdates":
             acknowledged = max(acknowledged, data.get("offset", 0))
-            result = [] if acknowledged > 1 else [{
-                "update_id": 1,
+            result = [{
+                "update_id": update_id,
                 "message": {
-                    "text": "/start",
+                    "text": text,
                     "chat": {"id": 42, "type": "private"},
                     "from": {"id": 42, "is_bot": False},
                 },
-            }]
+            } for update_id, text in ((0, "/start"), (1, OTP)) if update_id >= acknowledged]
         else:
             assert method == "sendMessage"
             sent.append(data)
@@ -120,7 +125,8 @@ def test_telegram_only_mode_registers_without_agentrouter_credentials(configured
     clients = install_transport(monkeypatch, handler)
     assert cli.main(["--test-telegram"]) == 0
     assert [item["text"] for item in sent] == [
-        CONNECTED_MESSAGE, "AgentRouter prober Telegram test successful."
+        OWNERSHIP_OTP_PROMPT.format(attempts=10), CONNECTED_MESSAGE,
+        "AgentRouter prober Telegram test successful."
     ]
     assert all(item["chat_id"] == "42" for item in sent)
     assert TelegramRegistrationStore(configured_env).load().chat_id == 42
@@ -173,7 +179,7 @@ def test_bot_collects_missing_credentials_and_keeps_valid_values_when_a_check_fa
         }}
 
     updates = [
-        message(1, "/start"), message(2, "/help"), message(3, "/balance"),
+        message(0, "/start"), message(1, OTP), message(2, "/help"), message(3, "/balance"),
         message(4, "sk-other-user", user_id=99),
         message(5, None, photo=[{"file_id": "photo-id"}], caption="sk-caption"),
         message(6, "sk-with-document", document={"file_id": "document-id"}),
@@ -379,7 +385,7 @@ def test_polling_starts_after_registration_and_delivers_alerts(
             return telegram(request)
         registration = TelegramRegistrationStore(configured_env).load()
         assert registration.chat_id == 42 and registration.next_update_id is None
-        assert sent[0]["text"] == CONNECTED_MESSAGE
+        assert sent[1]["text"] == CONNECTED_MESSAGE
         model_requests.append(request.url.path)
         if request.url.path == "/api/user/model-status":
             assert request.headers["new-api-user"] == "60923"
@@ -405,7 +411,7 @@ def test_polling_starts_after_registration_and_delivers_alerts(
     assert not health_is_fresh(configured_env, 3600)
     assert cli.main(["--once"] if once else []) == 0
     assert model_requests == ["/api/user/model-status", "/v1/responses"]
-    assert len(sent) == 2 and all(item["chat_id"] == "42" for item in sent)
+    assert len(sent) == 3 and all(item["chat_id"] == "42" for item in sent)
     assert health_is_fresh(configured_env, 3600)
     assert not StateStore(configured_env).load().model("gpt-6-astra").notification_pending
     assert all(client.is_closed for client in clients)
@@ -594,7 +600,8 @@ def test_daemon_menu_handles_commands_queued_after_start(
         }}
 
     updates = [
-        message(1, 42, "/start"),
+        message(0, 42, "/start"),
+        message(1, 42, OTP),
         message(2, 42, "/status"),
         message(3, 42, "⏱️ Schedule"),
         message(4, 42, "Every 30 min"),
@@ -641,7 +648,7 @@ def test_daemon_menu_handles_commands_queued_after_start(
     assert "✅ Automatic probes every 30 minutes" in texts
     assert texts.count(TELEGRAM_HELP) == 2
     assert all(item["chat_id"] == "42" for item in sent)
-    assert sent[0]["reply_markup"]["keyboard"] == [
+    assert sent[1]["reply_markup"]["keyboard"] == [
         [{"text": "📡 Status"}, {"text": "⚡ Probe Now"}],
         [{"text": "💰 Balance"}, {"text": "🔑 API Keys"}],
         [{"text": "🔔 Credit Alerts"}, {"text": "📊 Weekly Digest"}],

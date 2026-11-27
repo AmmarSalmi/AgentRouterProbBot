@@ -1,21 +1,31 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+import re
+import secrets
+from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
+from time import monotonic
 from typing import Any, TypeVar
 
-from .clients import TelegramBot, TelegramClient, TransientClientError
+from .clients import ClientError, TelegramBot, TelegramClient, TransientClientError
 from .config import ConfigurationError
 from .messages import TELEGRAM_MENU
-from .state import write_json_atomic
+from .state import write_text_atomic
 
 
 LOGGER = logging.getLogger(__name__)
 CONNECTED_MESSAGE = "Connected. Choose an action to get started."
+OWNERSHIP_OTP_PATTERN = re.compile(r"[0-9]{10}")
+OWNERSHIP_OTP_TTL = 600
+OWNERSHIP_MAX_CHALLENGES = 256
+OWNERSHIP_OTP_PROMPT = "Send the one-time ownership code you set in .env. Attempts remaining: {attempts}."
+OWNERSHIP_OTP_LOCKED = "Attempts remaining: 0. Restart the container to try again."
+OWNERSHIP_OTP_EXPIRED = "The pairing window has expired. Restart the bot on the host to try again."
+OWNERSHIP_FIELDS = {"TELEGRAM_CHAT_ID", "TELEGRAM_BOT_ID", "TELEGRAM_NEXT_UPDATE_ID"}
 NON_TEXT_MESSAGE_FIELDS = {
     "animation", "audio", "caption", "caption_entities", "checklist", "contact",
     "dice", "document", "game", "live_photo", "location", "media_group_id",
@@ -36,11 +46,7 @@ class TelegramRegistration:
 
 class TelegramRegistrationStore:
     def __init__(self, state_path: Path):
-        self.path = state_path.with_name("telegram.json")
-        if self.path == state_path:
-            raise ConfigurationError(
-                "STATE_PATH must not use telegram.json; it is reserved for Telegram registration"
-            )
+        self.path = state_path.parent / "ownership" / ".env"
 
     def load(self) -> TelegramRegistration | None:
         try:
@@ -50,40 +56,50 @@ class TelegramRegistrationStore:
         except UnicodeError:
             raise ConfigurationError(
                 f"Invalid Telegram registration encoding: {self.path}. Restore the file, "
-                "or stop the service and remove it deliberately to register again."
+                "or stop the service and correct it before restarting."
             ) from None
         except OSError:
             raise ConfigurationError(f"Cannot read Telegram registration: {self.path}") from None
         try:
-            raw = json.loads(content)
-            if not isinstance(raw, dict) or type(raw.get("version")) is not int or raw["version"] != 1:
-                raise ValueError("unsupported registration")
-            if any(type(raw.get(key)) is not int or raw[key] <= 0 for key in (
-                "bot_id", "chat_id", "owner_user_id"
-            )):
-                raise ValueError("invalid registration IDs")
-            if raw["chat_id"] != raw["owner_user_id"]:
-                raise ValueError("registration is not a private chat")
-            next_update_id = raw["next_update_id"]
-            if next_update_id is not None and (
-                type(next_update_id) is not int or next_update_id < 0
-            ):
+            fields: dict[str, str] = {}
+            for line in content.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                key, separator, value = line.partition("=")
+                key = key.strip()
+                if not separator or key not in OWNERSHIP_FIELDS or key in fields:
+                    raise ValueError("invalid ownership field")
+                fields[key] = value.strip()
+            chat = fields.get("TELEGRAM_CHAT_ID", "")
+            if not chat:
+                return None
+            bot = fields.get("TELEGRAM_BOT_ID", "")
+            offset = fields.get("TELEGRAM_NEXT_UPDATE_ID", "")
+            if not re.fullmatch(r"[1-9][0-9]{0,18}", chat) or not re.fullmatch(r"[1-9][0-9]{0,18}", bot):
+                raise ValueError("invalid ownership identifiers")
+            if offset and not re.fullmatch(r"[0-9]{1,19}", offset):
                 raise ValueError("invalid update offset")
             return TelegramRegistration(
-                bot_id=raw["bot_id"],
-                chat_id=raw["chat_id"],
-                owner_user_id=raw["owner_user_id"],
-                next_update_id=next_update_id,
+                bot_id=int(bot), chat_id=int(chat), owner_user_id=int(chat),
+                next_update_id=int(offset) if offset else None,
             )
-        except (ValueError, KeyError, TypeError):
+        except ValueError:
             raise ConfigurationError(
-                f"Invalid Telegram registration: {self.path}. Restore the file, or stop "
-                "the service and remove it deliberately to register a recipient again."
+                f"Invalid Telegram registration: {self.path}. Restore the file or clear "
+                "TELEGRAM_CHAT_ID in it before restarting to pair again."
             ) from None
 
     def save(self, registration: TelegramRegistration) -> None:
+        offset = registration.next_update_id
         try:
-            write_json_atomic(self.path, {"version": 1, **asdict(registration)})
+            write_text_atomic(
+                self.path,
+                "# Clear TELEGRAM_CHAT_ID and set a fresh OWNERSHIP_OTP in the project .env to pair again.\n"
+                f"TELEGRAM_CHAT_ID={registration.chat_id}\n"
+                f"TELEGRAM_BOT_ID={registration.bot_id}\n"
+                f"TELEGRAM_NEXT_UPDATE_ID={offset if offset is not None else ''}\n",
+            )
         except OSError:
             raise ConfigurationError(f"Cannot save Telegram registration: {self.path}") from None
 
@@ -107,7 +123,7 @@ def plain_message_text(message: dict[str, Any]) -> str | None:
     return text
 
 
-def _private_start(update: dict[str, Any], bot: TelegramBot) -> int | None:
+def _private_message(update: dict[str, Any]) -> tuple[int, str] | None:
     message = update.get("message")
     if not isinstance(message, dict):
         return None
@@ -123,15 +139,24 @@ def _private_start(update: dict[str, Any], bot: TelegramBot) -> int | None:
         or type(chat.get("id")) is not int
         or chat["id"] != sender["id"]
         or text is None
-        or not text.startswith("/")
+        or not text.strip()
     ):
         return None
+    return chat["id"], text
+
+
+def _is_start(text: str, bot: TelegramBot) -> bool:
     command, separator, addressed_bot = text.split(maxsplit=1)[0].partition("@")
-    if command != "/start" or (
-        separator and addressed_bot.lower() != bot.username.lower()
-    ):
-        return None
-    return chat["id"]
+    return command == "/start" and (not separator or addressed_bot.lower() == bot.username.lower())
+
+
+async def _pairing_reply(client: TelegramClient, chat_id: int, text: str) -> bool:
+    try:
+        await client.send(text, chat_id=str(chat_id))
+    except ClientError:
+        LOGGER.warning("Could not send a Telegram ownership reply")
+        return False
+    return True
 
 
 async def _finish_registration(
@@ -141,7 +166,7 @@ async def _finish_registration(
 ) -> None:
     client.chat_id = str(registration.chat_id)
     if registration.next_update_id is not None:
-        # Acknowledge through /start, leaving later commands queued for the listener.
+        # Acknowledge through the OTP, leaving later commands queued for the listener.
         await retry_telegram(lambda: client.get_updates(registration.next_update_id, timeout=0))
         await retry_telegram(lambda: client.send(CONNECTED_MESSAGE, reply_markup=TELEGRAM_MENU))
         store.save(replace(registration, next_update_id=None))
@@ -151,13 +176,24 @@ async def _finish_registration(
 async def _resolve(client: TelegramClient, state_path: Path) -> None:
     store = TelegramRegistrationStore(state_path)
     registration = store.load()
-    bot = await retry_telegram(client.get_me)
-    if registration is not None and registration.bot_id == bot.id:
-        await _finish_registration(client, store, registration)
-        return
+    bot = None
     if registration is not None:
-        LOGGER.info("Telegram bot changed; a new recipient must press Start")
-    LOGGER.info("Waiting for /start in a private chat with @%s", bot.username)
+        bot = await retry_telegram(client.get_me)
+        if registration.bot_id == bot.id:
+            await _finish_registration(client, store, registration)
+            return
+        LOGGER.info("Telegram bot changed; the owner must pair again")
+    otp = client.settings.ownership_otp
+    if otp is None or not OWNERSHIP_OTP_PATTERN.fullmatch(otp):
+        raise ConfigurationError(
+            "Set OWNERSHIP_OTP to a random 10-digit code or set TELEGRAM_CHAT_ID in .env"
+        )
+    if bot is None:
+        bot = await retry_telegram(client.get_me)
+    expires_at = monotonic() + OWNERSHIP_OTP_TTL
+    LOGGER.info("Waiting for /start in a private chat with @%s for ownership pairing", bot.username)
+    challenges: deque[int] = deque(maxlen=OWNERSHIP_MAX_CHALLENGES)
+    attempts_left = client.settings.ownership_otp_max_attempts
     offset = None
     while True:
         updates = await retry_telegram(lambda: client.get_updates(offset))
@@ -166,8 +202,30 @@ async def _resolve(client: TelegramClient, state_path: Path) -> None:
             continue
         offset = updates[-1]["update_id"] + 1
         for update in updates:
-            chat_id = _private_start(update, bot)
-            if chat_id is None:
+            private_message = _private_message(update)
+            if private_message is None:
+                continue
+            chat_id, text = private_message
+            if _is_start(text, bot):
+                if attempts_left == 0:
+                    await _pairing_reply(client, chat_id, OWNERSHIP_OTP_LOCKED)
+                elif monotonic() >= expires_at:
+                    await _pairing_reply(client, chat_id, OWNERSHIP_OTP_EXPIRED)
+                elif chat_id not in challenges and await _pairing_reply(
+                    client, chat_id, OWNERSHIP_OTP_PROMPT.format(attempts=attempts_left)
+                ):
+                    challenges.append(chat_id)
+                continue
+            if attempts_left == 0 or chat_id not in challenges:
+                continue
+            if monotonic() >= expires_at:
+                challenges.remove(chat_id)
+                await _pairing_reply(client, chat_id, OWNERSHIP_OTP_EXPIRED)
+                continue
+            if not OWNERSHIP_OTP_PATTERN.fullmatch(text) or not secrets.compare_digest(text, otp):
+                attempts_left -= 1
+                status = f"Attempts remaining: {attempts_left}." if attempts_left else OWNERSHIP_OTP_LOCKED
+                await _pairing_reply(client, chat_id, f"Incorrect ownership code. {status}")
                 continue
             registration = TelegramRegistration(bot.id, chat_id, chat_id, update["update_id"] + 1)
             # Persist the recipient before any reply or acknowledgment. A restart
