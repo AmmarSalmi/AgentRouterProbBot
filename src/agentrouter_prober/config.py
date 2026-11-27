@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from urllib.parse import urlparse
+
+import httpx
 
 
 MODEL_KEY = "AGENTROUTER_API_KEY"
@@ -119,11 +120,14 @@ def save_agentrouter_credentials(state_path: Path, credentials: dict[str, str]) 
             temporary.unlink(missing_ok=True)
 
 
-def _url(name: str, default: str) -> str:
+def _https_url(name: str, default: str) -> str:
     value = os.getenv(name, default).strip().rstrip("/")
-    parsed = urlparse(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ConfigurationError(f"{name} must be an HTTP(S) URL")
+    try:
+        parsed = httpx.URL(value)
+    except httpx.InvalidURL:
+        raise ConfigurationError(f"{name} must be an absolute HTTPS URL") from None
+    if parsed.scheme != "https" or not parsed.is_absolute_url:
+        raise ConfigurationError(f"{name} must be an absolute HTTPS URL")
     return value
 
 
@@ -145,7 +149,7 @@ class TelegramSettings:
         return cls(
             bot_token=_required_any("TELEGRAM_BOT_TOKEN"),
             chat_id=chat_id,
-            api_base_url=_url("TELEGRAM_API_BASE_URL", "https://api.telegram.org"),
+            api_base_url=_https_url("TELEGRAM_API_BASE_URL", "https://api.telegram.org"),
             ownership_otp=os.getenv("OWNERSHIP_OTP", "").strip() or None,
             ownership_otp_max_attempts=_positive_int(
                 "OWNERSHIP_OTP_MAX_ATTEMPTS", DEFAULT_OWNERSHIP_OTP_MAX_ATTEMPTS
@@ -191,7 +195,7 @@ class Settings:
         state_path = Path(os.getenv("STATE_PATH", "/data/state.json"))
         credentials = load_agentrouter_credentials(state_path, required=require_agentrouter)
         return cls(
-            agentrouter_base_url=_url(
+            agentrouter_base_url=_https_url(
                 "AGENTROUTER_BASE_URL", "https://agentrouter.org"
             ),
             agentrouter_api_key=credentials.get(MODEL_KEY, ""),

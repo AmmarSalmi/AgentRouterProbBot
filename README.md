@@ -360,13 +360,13 @@ produce an error.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `AGENTROUTER_BASE_URL` | `https://agentrouter.org` | Status and model API host |
+| `AGENTROUTER_BASE_URL` | `https://agentrouter.org` | HTTPS base URL for the status and model APIs |
 | `AGENTROUTER_API_KEY` | empty | Model key for probing. Can be entered through Telegram setup. |
 | `AGENTROUTER_PROBE_KEY_ID` | empty | Optional positive dashboard key ID for the probing-key quota warning |
 | `TELEGRAM_CHAT_ID` | empty | Numeric chat ID or `@username` for a channel. Leave blank to pair in private. |
 | `OWNERSHIP_OTP` | empty | Private, random 10-digit pairing code. Set it when pairing a new chat. |
 | `OWNERSHIP_OTP_MAX_ATTEMPTS` | `10` | Total incorrect pairing submissions allowed across all chats before a restart is required. |
-| `TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | Telegram API host |
+| `TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | HTTPS base URL for the Telegram API |
 | `AGENTROUTER_DASHBOARD_TOKEN` | empty | Dashboard access token for balance, model discovery, API key metadata, and usage logs |
 | `AGENTROUTER_USER_ID` | empty | Positive account ID paired with the dashboard token |
 | `POLL_SECONDS` | `900` | Default interval between automatic probe cycles |

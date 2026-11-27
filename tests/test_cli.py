@@ -45,6 +45,7 @@ def install_transport(monkeypatch, handler, *, mock_validation=True):
     clients = []
 
     def respond(request):
+        assert request.url.scheme == "https"
         if mock_validation and request.url.host == "agentrouter.test":
             if request.url.path == "/v1/models":
                 assert request.method == "GET"
@@ -153,6 +154,22 @@ def test_cli_rejects_invalid_dashboard_credentials(
 
     assert cli.main(["--once"]) == 2
     assert f"{name} {reason}" in caplog.text
+    assert not configured_env.exists()
+
+
+@pytest.mark.parametrize(
+    "name,mode",
+    [("AGENTROUTER_BASE_URL", ["--once"]), ("TELEGRAM_API_BASE_URL", ["--test-telegram"])],
+)
+@pytest.mark.parametrize("url", ["http://127.0.0.1:8080", "https://"])
+def test_cli_rejects_invalid_https_api_endpoints(configured_env, monkeypatch, caplog, name, mode, url):
+    monkeypatch.setenv(name, url)
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kwargs: pytest.fail("Network initialized with an invalid API URL")
+    )
+
+    assert cli.main(mode) == 2
+    assert f"{name} must be an absolute HTTPS URL" in caplog.text
     assert not configured_env.exists()
 
 
@@ -377,6 +394,7 @@ def test_daemon_recovers_from_temporary_startup_validation_failure(configured_en
 def test_polling_starts_after_registration_and_delivers_alerts(
     configured_env, monkeypatch, once, completed_response
 ):
+    monkeypatch.delenv("AGENTROUTER_CLIENT_USER_AGENT", raising=False)
     sent, model_requests = [], []
     telegram = telegram_response(sent)
 
@@ -386,6 +404,8 @@ def test_polling_starts_after_registration_and_delivers_alerts(
         registration = TelegramRegistrationStore(configured_env).load()
         assert registration.chat_id == 42 and registration.next_update_id is None
         assert sent[1]["text"] == CONNECTED_MESSAGE
+        assert request.headers["user-agent"] == "codex_cli_rs/0.171.0 (Windows 11; x86_64)"
+        assert request.headers["originator"] == "codex_cli_rs"
         model_requests.append(request.url.path)
         if request.url.path == "/api/user/model-status":
             assert request.headers["new-api-user"] == "60923"
