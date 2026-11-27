@@ -5,6 +5,12 @@ availability changes, account usage, and API key quotas. By default it checks
 every listed model every 15 minutes, with two requests at a time and up to
 32 output tokens per probe.
 
+## New to AgentRouter?
+
+If you don’t have an AgentRouter account yet, you’re welcome to use my referral
+link to get an extra **$50 in free credit** when you sign up.
+[Sign up with my AgentRouter referral link](https://agentrouter.org/register?aff=Atwh)
+
 - [Start with Docker](#start-with-docker)
 - [Pair your Telegram account](#pair-your-telegram-account)
 - [Set up AgentRouter credentials](#agentrouter-credentials)
