@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM python:3.13-slim@sha256:7249d5587b78209a006dc4a3b5340678f84ea729239193aa559962cd8c1fce50
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -7,15 +7,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN groupadd --system prober \
-    && useradd --system --gid prober --home-dir /app prober \
+RUN groupadd --system --gid 999 prober \
+    && useradd --system --uid 999 --gid prober --home-dir /app prober \
     && mkdir -p /data \
     && chown prober:prober /data
+
+COPY requirements-docker.txt ./
+RUN pip install --require-hashes --only-binary=:all: -r requirements-docker.txt
 
 COPY pyproject.toml README.md ./
 COPY src ./src
 
-RUN pip install .
+RUN pip install --no-index --no-build-isolation --no-deps .
 
 USER prober
 

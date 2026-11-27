@@ -6,9 +6,10 @@ import math
 import time
 from collections import Counter
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from enum import Enum
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
@@ -16,7 +17,7 @@ import httpx
 
 from . import __version__
 from .config import Settings, TelegramSettings
-from .state import utc_now
+from .state import TelegramContactStore, utc_now
 
 
 TELEGRAM_USER_AGENT = f"AgentRouterAvailabilityProber/{__version__}"
@@ -452,6 +453,9 @@ class AgentRouterClient:
     async def fetch_api_keys(self) -> dict[int, ApiKey]:
         keys = {}
         probe_key = self.settings.agentrouter_api_key.removeprefix("sk-")
+        configured_id = self.settings.agentrouter_probe_key_id
+        matched_key = False
+        fallback_key_id = None
         async for item in self._dashboard_items(
             "/api/token/", label="API key list", console_page="token"
         ):
@@ -467,6 +471,13 @@ class AgentRouterClient:
             ):
                 raise ProtocolError("API key list returned invalid key quota or status")
             key_value = item.get("key")
+            if key_id == configured_id and (
+                not isinstance(key_value, str) or not key_value.strip()
+                or any(mask in key_value for mask in ("*", "•", "…", "..."))
+            ):
+                fallback_key_id = key_id
+            is_probe_key = isinstance(key_value, str) and key_value.removeprefix("sk-") == probe_key
+            matched_key |= is_probe_key
             name = _display_label(item.get("name")) or f"Key #{key_id}"
             expires_at = item.get("expired_time")
             last_used_at = item.get("accessed_time")
@@ -488,8 +499,10 @@ class AgentRouterClient:
                 model_limits=allowed_models,
                 allowed_ips=tuple(allowed_ips.replace(",", " ").split())
                 if isinstance(allowed_ips, str) else (),
-                is_probe_key=isinstance(key_value, str) and key_value.removeprefix("sk-") == probe_key,
+                is_probe_key=is_probe_key,
             )
+        if not matched_key and fallback_key_id is not None:
+            keys[fallback_key_id] = replace(keys[fallback_key_id], is_probe_key=True)
         return keys
 
     async def fetch_usage_totals(
@@ -649,7 +662,11 @@ class AgentRouterClient:
             else:
                 reply = _validate_anthropic(parsed)
             return ModelProbe(ProbeOutcome.AVAILABLE, api, latency_ms, reply)
-        if response.status_code in {402, 503}:
+        if response.status_code == 402:
+            return ModelProbe(ProbeOutcome.UNAVAILABLE, api, latency_ms)
+        if response.status_code == 503 and any(
+            marker in _message(parsed).lower() for marker in ("no available channel", "无可用渠道")
+        ):
             return ModelProbe(ProbeOutcome.UNAVAILABLE, api, latency_ms)
         if response.status_code == 404 and any(
             marker in lowered for marker in ("model", "not found", "不存在")
@@ -684,6 +701,8 @@ class TelegramClient:
         settings: TelegramSettings,
         timeout_seconds: int = 30,
         http_client: httpx.AsyncClient | None = None,
+        *,
+        state_path: Path | None = None,
     ):
         self.settings = settings
         self.chat_id = settings.chat_id
@@ -691,6 +710,10 @@ class TelegramClient:
         self.send_retry_at: datetime | None = None
         self._send_lock = asyncio.Lock()
         self.timeout_seconds = timeout_seconds
+        self._contact = (
+            TelegramContactStore(state_path, settings.api_base_url, settings.bot_token)
+            if state_path is not None else None
+        )
         self._owns_client = http_client is None
         self.http = http_client or httpx.AsyncClient(
             timeout=timeout_seconds,
@@ -756,6 +779,8 @@ class TelegramClient:
             raise ProtocolError("Telegram rejected the request")
         if "result" not in payload:
             raise ProtocolError("Telegram response did not contain a result")
+        if self._contact is not None:
+            self._contact.record()
         return payload["result"]
 
     async def get_me(self) -> TelegramBot:

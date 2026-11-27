@@ -22,7 +22,7 @@ from .clients import (
 )
 from .config import ConfigurationError, Settings, TelegramSettings
 from .setup import AgentRouterSetup
-from .state import health_is_fresh
+from .state import TelegramContactStore, health_is_fresh, utc_now
 from .telegram import resolve_telegram_chat
 
 
@@ -41,6 +41,9 @@ def _parser() -> argparse.ArgumentParser:
         "--healthcheck",
         action="store_true",
         help=argparse.SUPPRESS,
+    )
+    modes.add_argument(
+        "--telegram-status", action="store_true", help="Show the last recorded Telegram contact and its age"
     )
     return parser
 
@@ -108,11 +111,11 @@ async def _run_until_stopped(
 
 async def _test_telegram() -> int:
     settings = TelegramSettings.from_env()
-    client = TelegramClient(settings)
+    path = Path(os.getenv("STATE_PATH", "/data/state.json"))
+    client = TelegramClient(settings, state_path=path)
     stop_event = asyncio.Event()
 
     async def run() -> int:
-        path = Path(os.getenv("STATE_PATH", "/data/state.json"))
         if not await resolve_telegram_chat(client, path, stop_event):
             return 0
         await client.send("AgentRouter prober Telegram test successful.")
@@ -128,7 +131,7 @@ async def _test_telegram() -> int:
 
 async def _run(settings: Settings, once: bool) -> int:
     telegram = TelegramClient(
-        settings.telegram, timeout_seconds=settings.request_timeout_seconds
+        settings.telegram, timeout_seconds=settings.request_timeout_seconds, state_path=settings.state_path
     )
     stop_event = asyncio.Event()
 
@@ -171,6 +174,16 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if health_is_fresh(settings.state_path, settings.health_max_age_seconds) else 1
         if args.test_telegram:
             return asyncio.run(_test_telegram())
+        if args.telegram_status:
+            settings = TelegramSettings.from_env()
+            path = Path(os.getenv("STATE_PATH", "/data/state.json"))
+            last_contact = TelegramContactStore(path, settings.api_base_url, settings.bot_token).load()
+            if last_contact is None:
+                print("No successful Telegram contact has been recorded for this bot.")
+                return 1
+            age = max(0, int((utc_now() - last_contact).total_seconds()))
+            print(f"Last successful Telegram contact {last_contact.isoformat()} ({age}s ago).")
+            return 0
         return asyncio.run(_run(Settings.from_env(require_agentrouter=args.once), args.once))
     except ConfigurationError as exc:
         logging.getLogger(__name__).error("Configuration error: %s", exc)

@@ -45,6 +45,7 @@ from .state import (
     KeyAlert,
     KeyAlertKind,
     KeyMonitoring,
+    ManualProbeState,
     PersistentState,
     ProbeKeyAlert,
     StateStore,
@@ -100,8 +101,15 @@ class Prober:
             f"{settings.agentrouter_base_url}\0{settings.agentrouter_user_id}"
             f"\0{settings.agentrouter_api_key.removeprefix('sk-')}"
         )
+        if settings.agentrouter_probe_key_id is not None:
+            key_identity += f"\0{settings.agentrouter_probe_key_id}"
         self._probe_key_fingerprint = sha256(key_identity.encode()).hexdigest()
-        self._cycle_lock = asyncio.Lock()
+        self._cycle_task: asyncio.Task[CycleResult] | None = None
+        manual_probe = self.state.manual_probe
+        self._interrupted_probe_at = (
+            parse_datetime(manual_probe.last_requested_at)
+            if manual_probe is not None and manual_probe.pending_update_id is not None else None
+        )
         self._poll_wakeup = asyncio.Event()
         self.telegram.send_retry_at = parse_datetime(self.state.telegram_retry_at)
 
@@ -334,11 +342,13 @@ class Prober:
                     )
 
     async def status_snapshot(self) -> PersistentState:
-        was_running = self._cycle_lock.locked()
-        async with self._cycle_lock:
-            if not was_running and not self.has_model_status:
-                await self._run_and_save()
-            return deepcopy(self.state)
+        if self.cycle_running or (not self.has_model_status and self._interrupted_probe_at is None):
+            await self.run_cycle()
+        return deepcopy(self.state)
+
+    def save_manual_probe(self, request: ManualProbeState) -> None:
+        self.store.save(replace(self.state, manual_probe=request))
+        self.state.manual_probe = request
 
     def record_telegram_retry(self, error: TransientClientError) -> None:
         if error.retry_after is None:
@@ -431,9 +441,27 @@ class Prober:
             return sent, True
         return sent, False
 
+    @property
+    def cycle_running(self) -> bool:
+        return self._cycle_task is not None and not self._cycle_task.done()
+
+    def start_cycle(self, now: datetime | None = None) -> tuple[asyncio.Task[CycleResult], bool]:
+        current = self._cycle_task
+        if current is not None and not current.done():
+            return current, False
+        self._interrupted_probe_at = None
+        self._cycle_task = asyncio.create_task(self._run_and_save(now))
+        return self._cycle_task, True
+
     async def run_cycle(self, now: datetime | None = None) -> CycleResult:
-        async with self._cycle_lock:
-            return await self._run_and_save(now)
+        cycle, started = self.start_cycle(now)
+        return await (cycle if started else asyncio.shield(cycle))
+
+    async def cancel_cycle(self) -> None:
+        if self._cycle_task is not None:
+            if not self._cycle_task.done():
+                self._cycle_task.cancel()
+            await asyncio.gather(self._cycle_task, return_exceptions=True)
 
     async def _run_and_save(self, now: datetime | None = None) -> CycleResult:
         cycle_time = (now or utc_now()).astimezone(UTC)
@@ -538,12 +566,14 @@ class Prober:
             self._poll_wakeup.set()
 
         stop_wakeup = asyncio.create_task(wake_on_stop())
+        started = None
+        earliest_next_cycle = monotonic()
+        if self._interrupted_probe_at is not None:
+            elapsed = max(0, (utc_now() - self._interrupted_probe_at).total_seconds())
+            started = earliest_next_cycle - elapsed
         try:
             while not stop_event.is_set():
-                started = monotonic()
-                await self.run_cycle()
-                earliest_next_cycle = monotonic() + 1
-                while not stop_event.is_set():
+                while started is not None and not stop_event.is_set():
                     self._poll_wakeup.clear()
                     next_cycle = max(started + self.poll_seconds, earliest_next_cycle)
                     delay = next_cycle - monotonic()
@@ -555,6 +585,11 @@ class Prober:
                             await self._poll_wakeup.wait()
                     except TimeoutError:
                         pass
+                if stop_event.is_set():
+                    break
+                started = monotonic()
+                await self.run_cycle()
+                earliest_next_cycle = monotonic() + 1
         finally:
             stop_wakeup.cancel()
             await asyncio.gather(stop_wakeup, return_exceptions=True)

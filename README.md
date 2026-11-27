@@ -141,8 +141,12 @@ probing key is low on quota.
 - **Status** (`/status`) shows the latest model probes. ✅ means available,
   ❌ means unavailable, and ❔ means unknown. Status waits for a running cycle,
   reads saved results, or starts a cycle when there are none.
-- **Probe Now** (`/probe_now`) refreshes the model list and probes every listed
-  model immediately.
+- **Probe Now** (`/probe_now`) runs a background sweep of every listed model and
+  sends the results when it finishes. If a sweep is running, the bot sends that
+  sweep's results. A new manual sweep can start 60 seconds after the last one
+  finishes. The automatic interval stays the same. If the bot restarts during
+  a manual sweep, it reports that the previous result is unknown. Tap **Probe
+  Now** to start a new manual sweep.
 - **Balance** (`/balance`) shows your balance, total usage, request count,
   and account group. The bot uses AgentRouter’s public `/api/status` settings
   to convert quota to dollars.
@@ -187,7 +191,10 @@ when a limited key falls below $1.00 by default. Set `PROBE_KEY_LOW_BALANCE_USD`
 to change the threshold. Accounts that use quota units see the equivalent
 threshold in quota units. The warning fires once per low-quota period and
 rearms when the quota recovers to the threshold. Unlimited keys have no
-per-key balance to monitor.
+per-key balance to monitor. If the dashboard hides full key values, set
+`AGENTROUTER_PROBE_KEY_ID` to the numeric ID shown beside the probing key in
+**API Keys**. An exact key match takes precedence when the dashboard returns
+the full key. Update the ID when you switch to a different key.
 
 ## API key monitoring
 
@@ -248,9 +255,11 @@ corrupt registration produces an error.
 - Confirmation requires a valid API response with generated output. A
   Responses request stopped by its output-token limit also confirms
   availability when it contains output or reports generated tokens.
-- HTTP 402 pool exhaustion, HTTP 503, and recognized no-channel/model-not-found
-  responses mean unavailable. Timeouts, rate limits, and malformed replies are
-  recorded as probe errors instead of being guessed as unavailable.
+- HTTP 402 pool exhaustion and recognized no-channel/model-not-found responses
+  mean unavailable. A 503 with a structured no-channel message also counts as
+  unavailable. A generic 503 is a temporary probe error and preserves the
+  previous confirmed availability. Timeouts, rate limits, and malformed replies
+  are also recorded as probe errors.
 - Changes in confirmed availability produce one compact list for all live
   models, grouped under **Available** and **Not available**. The list contains
   model names only; failed or unconfirmed checks appear under **Unknown**.
@@ -264,6 +273,7 @@ corrupt registration produces an error.
 | --- | --- | --- |
 | `AGENTROUTER_BASE_URL` | `https://agentrouter.org` | Status and model API host |
 | `AGENTROUTER_API_KEY` | empty | Model key for probing. Can be entered through Telegram setup. |
+| `AGENTROUTER_PROBE_KEY_ID` | empty | Optional positive dashboard key ID for the probing-key quota warning |
 | `TELEGRAM_CHAT_ID` | empty | Numeric chat ID or `@username` for a channel. Leave blank to register via Start. |
 | `TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | Telegram API host |
 | `AGENTROUTER_DASHBOARD_TOKEN` | empty | Dashboard access token for balance, model discovery, API key metadata, and usage logs |
@@ -288,6 +298,13 @@ Once the three AgentRouter values are present, it checks the age of the last
 successful model-status read. At service startup, unreadable state data is
 preserved beside `STATE_PATH` with a `.corrupt-` suffix before monitoring starts
 with empty state.
+
+Use `agentrouter-prober --telegram-status` to read the last successful Telegram
+contact and its age from disk. With Compose, run
+`docker compose exec prober python -m agentrouter_prober --telegram-status`.
+The bot refreshes the timestamp at most once a minute. For a group or channel
+destination, it advances when the bot sends a notification. This signal is
+independent of Docker health.
 
 ## Tests
 

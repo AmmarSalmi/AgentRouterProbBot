@@ -162,6 +162,7 @@ class Settings:
     client_user_agent: str
     reasoning_effort: str = "low"
     probe_key_low_balance_usd: Decimal = Decimal("1.00")
+    agentrouter_probe_key_id: int | None = None
 
     @classmethod
     def from_env(cls, *, require_agentrouter: bool = False) -> "Settings":
@@ -178,6 +179,7 @@ class Settings:
             raise ConfigurationError(threshold_error) from exc
         if not key_alert_threshold.is_finite() or key_alert_threshold <= 0:
             raise ConfigurationError(threshold_error)
+        probe_key_id = os.getenv("AGENTROUTER_PROBE_KEY_ID", "").strip()
 
         state_path = Path(os.getenv("STATE_PATH", "/data/state.json"))
         credentials = load_agentrouter_credentials(state_path, required=require_agentrouter)
@@ -203,4 +205,7 @@ class Settings:
             ).strip(),
             reasoning_effort=reasoning_effort,
             probe_key_low_balance_usd=key_alert_threshold,
+            agentrouter_probe_key_id=(
+                _parse_positive_int("AGENTROUTER_PROBE_KEY_ID", probe_key_id) if probe_key_id else None
+            ),
         )

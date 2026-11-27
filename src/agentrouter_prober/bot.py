@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from dataclasses import replace
+from datetime import timedelta
 from decimal import Decimal
 from importlib.resources import files
+from math import ceil
 from typing import Any
 
-from .app import Prober
+from .app import CycleResult, Prober
 from .clients import ClientError, ProtocolError, TelegramClient, TransientClientError
 from .config import ACCOUNT_ID, DASHBOARD_TOKEN, MODEL_KEY, ConfigurationError
 from .key_messages import (
@@ -36,7 +39,7 @@ from .messages import (
     telegram_message_parts,
 )
 from .setup import AgentRouterSetup
-from .state import CreditAlertKind, KeyAlertKind, utc_now
+from .state import CreditAlertKind, KeyAlertKind, ManualProbeState, format_datetime, parse_datetime, utc_now
 from .telegram import plain_message_text, retry_telegram
 
 
@@ -46,6 +49,12 @@ CREDIT_AMOUNT = re.compile(
 )
 KEY_SELECTION = re.compile(r"Key #([0-9]{1,19})(?: · .*)?|🔑 .+ \(#([0-9]{1,19})\)", re.IGNORECASE)
 KEY_PAGE_SIZE = 8
+MANUAL_PROBE_COOLDOWN = 60
+MANUAL_UPDATE_RETENTION = timedelta(days=2)
+INTERRUPTED_PROBE_MESSAGE = (
+    "The previous Probe Now request was interrupted. Some probes may have run. "
+    "Tap Probe Now to try again."
+)
 KEY_ALERT_ACTIONS: dict[str, KeyAlertKind] = {
     "key spending alert": "spending",
     "spend alert": "spending",
@@ -113,6 +122,8 @@ class TelegramCommands:
         self._collecting_credentials = False
         self._ready = asyncio.Event()
         self._activation_lock = asyncio.Lock()
+        self._manual_probe_task: asyncio.Task[None] | None = None
+        self._reporting_interrupted_probe = False
         if prober is not None:
             self._ready.set()
         try:
@@ -231,6 +242,91 @@ class TelegramCommands:
                     raise
 
             await retry_telegram(send_part, "Telegram command reply")
+
+    def _manual_probe_scope(self) -> str:
+        if self.telegram.bot is None or self.owner_id is None:
+            raise RuntimeError("Manual probing requires an identified Telegram owner")
+        return f"{self.telegram.bot.id}:{self.owner_id}"
+
+    async def _report_interrupted_probe(self) -> None:
+        if self._reporting_interrupted_probe or self._prober is None or self.telegram.bot is None or not self.enabled:
+            return
+        if self._manual_probe_task is not None and not self._manual_probe_task.done():
+            return
+        request = self._prober.state.manual_probe
+        if (
+            request is None or request.scope != self._manual_probe_scope()
+            or request.pending_update_id is None or request.interruption_reported
+        ):
+            return
+        self._reporting_interrupted_probe = True
+        try:
+            await self.telegram.send(INTERRUPTED_PROBE_MESSAGE, reply_markup=TELEGRAM_MENU)
+            if self._prober.state.manual_probe is request:
+                self._prober.save_manual_probe(replace(request, interruption_reported=True))
+        except (ClientError, OSError) as exc:
+            LOGGER.warning("Could not report the interrupted probe: %s", exc)
+        finally:
+            self._reporting_interrupted_probe = False
+
+    async def _request_manual_probe(self, update_id: int) -> None:
+        scope = self._manual_probe_scope()
+        now = utc_now()
+        active = self._manual_probe_task is not None and not self._manual_probe_task.done()
+        previous = self.prober.state.manual_probe
+        if previous is not None and previous.scope != scope:
+            previous = None
+        if previous is not None and not active:
+            requested = parse_datetime(previous.last_requested_at)
+            if requested is not None and now - requested >= MANUAL_UPDATE_RETENTION:
+                previous = None
+        if previous is not None and update_id <= previous.last_update_id:
+            if previous.pending_update_id is not None and not previous.interruption_reported and not active:
+                await self._report_interrupted_probe()
+            else:
+                await self._reply("This Probe Now request was already handled. Tap Probe Now to try again.")
+            return
+
+        request = ManualProbeState(
+            scope, update_id, now.isoformat(),
+            pending_update_id=previous.pending_update_id if previous else None,
+            last_completed_at=previous.last_completed_at if previous else None,
+        )
+        if active:
+            self.prober.save_manual_probe(request)
+            await self._reply("A probe is already running. I’ll send the results when it finishes.")
+            return
+        completed = parse_datetime(request.last_completed_at)
+        if completed is not None and request.pending_update_id is None and not self.prober.cycle_running:
+            remaining = ceil(MANUAL_PROBE_COOLDOWN - max(0, (now - completed).total_seconds()))
+            if remaining > 0:
+                self.prober.save_manual_probe(request)
+                await self._reply(f"A probe just finished. Try Probe Now again in {remaining}s.")
+                return
+
+        self.prober.save_manual_probe(replace(request, pending_update_id=update_id))
+        cycle, started = self.prober.start_cycle()
+        self._manual_probe_task = asyncio.create_task(self._finish_manual_probe(cycle))
+        await self._reply(
+            "⏳ Probing every listed model…" if started
+            else "A probe is already running. I’ll send the results when it finishes."
+        )
+
+    async def _finish_manual_probe(self, cycle: asyncio.Task[CycleResult]) -> None:
+        try:
+            await asyncio.shield(cycle)
+            request = self.prober.state.manual_probe
+            if request is not None:
+                self.prober.save_manual_probe(replace(
+                    request, pending_update_id=None, last_completed_at=format_datetime(utc_now()),
+                ))
+            await self._reply(status_message(self.prober.state))
+        except (ClientError, OSError) as exc:
+            LOGGER.warning("Could not finish the manual probe: %s", exc)
+            try:
+                await self.telegram.send("The probe could not finish. Tap Probe Now to try again.")
+            except ClientError:
+                LOGGER.warning("Could not report the probe failure to Telegram")
 
     async def _activate(self) -> bool:
         async with self._activation_lock:
@@ -489,9 +585,7 @@ class TelegramCommands:
             else:
                 await self._reply(account_usage_message(usage))
         elif command == "probe":
-            await self._reply("⏳ Probing every listed model…")
-            await self.prober.run_cycle()
-            await self._reply(status_message(self.prober.state))
+            await self._request_manual_probe(update["update_id"])
         elif command == "schedule":
             await self._reply(
                 probing_schedule_message(
@@ -535,6 +629,7 @@ class TelegramCommands:
         if stop_event.is_set():
             return
         await self.prepare()
+        await self._report_interrupted_probe()
         offset = None
         while not stop_event.is_set():
             updates = await retry_telegram(
@@ -584,6 +679,7 @@ class TelegramCommands:
                 except ClientError:
                     LOGGER.warning("Could not send the AgentRouter setup notice to Telegram")
             await self._ready.wait()
+            await self._report_interrupted_probe()
             await self.prober.run_forever(stop_event)
 
         try:
@@ -620,5 +716,9 @@ class TelegramCommands:
                     if isinstance(result, Exception):
                         raise result
         finally:
+            if self._manual_probe_task is not None:
+                self._manual_probe_task.cancel()
+                await asyncio.gather(self._manual_probe_task, return_exceptions=True)
             if self._prober is not None:
+                await self._prober.cancel_cycle()
                 await self._prober.agentrouter.close()

@@ -5,8 +5,10 @@ import logging
 import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from time import monotonic
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -62,6 +64,32 @@ def write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+class TelegramContactStore:
+    def __init__(self, state_path: Path, api_base_url: str, bot_token: str):
+        self.path = state_path.with_name(f"{state_path.name}.telegram-contact.json")
+        self.scope = sha256(f"{api_base_url}\0{bot_token}".encode()).hexdigest()
+        self._next_write_at = float("-inf")
+
+    def record(self) -> None:
+        now = monotonic()
+        if now < self._next_write_at:
+            return
+        self._next_write_at = now + 60
+        try:
+            write_json_atomic(self.path, {"scope": self.scope, "contact_at": format_datetime(utc_now())})
+        except OSError as exc:
+            LOGGER.warning("Could not save the Telegram contact time: %s", exc)
+
+    def load(self) -> datetime | None:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError):
+            return None
+        if not isinstance(raw, dict) or raw.get("scope") != self.scope:
+            return None
+        return parse_datetime(raw.get("contact_at"))
 
 
 @dataclass
@@ -193,6 +221,38 @@ class KeyMonitoring:
         }
 
 
+@dataclass(frozen=True)
+class ManualProbeState:
+    scope: str
+    last_update_id: int
+    last_requested_at: str
+    pending_update_id: int | None = None
+    last_completed_at: str | None = None
+    interruption_reported: bool = False
+
+    @classmethod
+    def from_dict(cls, raw: object) -> ManualProbeState | None:
+        if not isinstance(raw, dict):
+            return None
+        scope = raw.get("scope")
+        last_update_id = raw.get("last_update_id")
+        last_requested_at = raw.get("last_requested_at")
+        pending = raw.get("pending_update_id")
+        completed = raw.get("last_completed_at")
+        if (
+            not isinstance(scope, str) or not scope
+            or type(last_update_id) is not int or last_update_id < 0
+            or not isinstance(last_requested_at, str) or parse_datetime(last_requested_at) is None
+            or (pending is not None and (type(pending) is not int or not 0 <= pending <= last_update_id))
+        ):
+            return None
+        return cls(
+            scope, last_update_id, last_requested_at, pending,
+            completed if isinstance(completed, str) else None,
+            raw.get("interruption_reported") is True,
+        )
+
+
 @dataclass
 class PersistentState:
     version: int = 2
@@ -206,6 +266,7 @@ class PersistentState:
     credit_alerts: dict[CreditAlertKind, CreditAlert] = field(default_factory=dict)
     probe_key_alert: ProbeKeyAlert | None = None
     key_monitoring: KeyMonitoring | None = None
+    manual_probe: ManualProbeState | None = None
 
     def model(self, name: str) -> ModelRecord:
         return self.models.setdefault(name, ModelRecord())
@@ -246,6 +307,7 @@ class PersistentState:
             credit_alerts=credit_alerts,
             probe_key_alert=ProbeKeyAlert.from_dict(raw.get("probe_key_alert")),
             key_monitoring=KeyMonitoring.from_dict(raw.get("key_monitoring")),
+            manual_probe=ManualProbeState.from_dict(raw.get("manual_probe")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -265,6 +327,7 @@ class PersistentState:
             },
             "probe_key_alert": asdict(self.probe_key_alert) if self.probe_key_alert else None,
             "key_monitoring": self.key_monitoring.to_dict() if self.key_monitoring else None,
+            "manual_probe": asdict(self.manual_probe) if self.manual_probe else None,
         }
 
 

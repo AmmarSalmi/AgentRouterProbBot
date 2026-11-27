@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -156,6 +157,32 @@ def test_probe_key_balance_matches_the_configured_key_across_dashboard_pages(unl
     assert keys[2].used_quota == 1000
     assert "different-test" not in repr(keys)
     assert paths == ["/api/token/"] * 2
+
+
+@pytest.mark.parametrize("key_value,fallback_value,expected_matches", [
+    ("te****", None, [2]),
+    ("te****", "other-key", []),
+    ("test", None, [1]),
+])
+def test_explicit_key_id_is_the_fallback_for_masked_keys(key_value, fallback_value, expected_matches):
+    async def run():
+        items = [
+            {"id": 1, "key": key_value, "status": 1, "unlimited_quota": False, "remain_quota": 5, "used_quota": 0},
+            {"id": 2, "key": fallback_value, "status": 1, "unlimited_quota": False, "remain_quota": 100, "used_quota": 0},
+        ]
+
+        def handler(request):
+            assert request.url.path == "/api/token/"
+            return httpx.Response(200, json={
+                "success": True, "data": {"items": items, "page": 1, "page_size": 20, "total": 2},
+            })
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            client = AgentRouterClient(replace(settings(), agentrouter_probe_key_id=2), http)
+            keys = await client.fetch_api_keys()
+            assert [key.id for key in keys.values() if key.is_probe_key] == expected_matches
+
+    asyncio.run(run())
 
 
 def test_quota_display_retries_fallback_then_caches_valid_settings():
@@ -330,6 +357,19 @@ def test_probe_rejects_http_success_without_model_output(body):
             )
         ) as http:
             with pytest.raises(ProtocolError):
+                await AgentRouterClient(settings(), http).probe_model(
+                    ModelObservation("gpt", "unknown", "none", ("responses",))
+                )
+
+    asyncio.run(run())
+
+
+def test_generic_503_is_a_temporary_probe_error():
+    async def run():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(503, text="Gateway unavailable"))
+        ) as http:
+            with pytest.raises(TransientClientError, match="HTTP 503"):
                 await AgentRouterClient(settings(), http).probe_model(
                     ModelObservation("gpt", "unknown", "none", ("responses",))
                 )

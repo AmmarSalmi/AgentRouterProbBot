@@ -13,6 +13,9 @@ polling the same Telegram bot token before starting the VPS service.
 ## 2. Set Linux permissions and credentials
 
 The Compose service runs the bot as UID/GID `10001:10001`.
+Existing Compose installs can keep the current `data/` ownership. The Docker
+image uses its named `prober` account (UID/GID `999:999`) in standalone
+`docker run` installs. Existing standalone volumes can keep their ownership.
 
 If you already have `.env.vps`, rename it to `.env` or copy its settings into
 your existing `.env` before running the commands below.
@@ -53,6 +56,30 @@ sudo docker compose ps
 Send `/start` in the bot's private chat, then tap **Status** or **Balance** to
 provide any missing credentials. The bot starts probing after validation and
 saves the verified values in `/data/credentials/.env` inside the container.
+
+## Update the Docker image and dependency pins
+
+Review the pins monthly and refresh them sooner for security updates. Use
+the multi-platform digest reported by
+`docker buildx imagetools inspect docker.io/library/python:3.13-slim` in
+`Dockerfile` so the same pin works on both amd64 and arm64.
+
+In a Python 3.13 development environment with `pip-tools` installed, refresh
+the hashed build and runtime requirements together.
+
+```sh
+python -m piptools compile --upgrade --all-build-deps --allow-unsafe \
+  --generate-hashes --strip-extras --no-emit-index-url \
+  --pip-args='--only-binary=:all:' --output-file requirements-docker.txt pyproject.toml
+python -m pip install --require-hashes --only-binary=:all: -r requirements-docker.txt
+python -m pip install --no-deps --no-build-isolation -e .
+python -m pytest tests/
+docker compose build
+```
+
+Run the test commands in a development environment with the test dependencies
+installed. Review and commit the new digest and lock file together after the
+offline suite and image build pass.
 
 ## Refresh the dashboard token
 

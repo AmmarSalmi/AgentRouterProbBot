@@ -418,6 +418,22 @@ def test_healthcheck_rejects_missing_telegram_configuration_with_fresh_state(con
     assert cli.main(["--healthcheck"]) == 2
 
 
+def test_telegram_status_is_local_and_scoped_to_the_configured_bot(configured_env, monkeypatch, capsys):
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    clients = install_transport(monkeypatch, telegram_response([]))
+    assert cli.main(["--telegram-status"]) == 1
+    assert not clients
+    assert cli.main(["--test-telegram"]) == 0
+    assert len(clients) == 1
+    assert cli.main(["--telegram-status"]) == 0
+    assert "Last successful Telegram contact" in capsys.readouterr().out
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:changed-token")
+    assert cli.main(["--telegram-status"]) == 1
+    assert len(clients) == 1
+    assert "No successful Telegram contact" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("mode", [["--test-telegram"], ["--once"], []])
 def test_shutdown_interrupts_setup_and_closes_clients(configured_env, monkeypatch, mode):
     previous = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)}

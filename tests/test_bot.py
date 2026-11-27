@@ -1,8 +1,10 @@
 import asyncio
 from collections import Counter
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
+from agentrouter_prober import bot as bot_module
 from agentrouter_prober.app import Prober
 from agentrouter_prober.bot import TelegramCommands
 from agentrouter_prober.clients import (
@@ -17,7 +19,7 @@ from agentrouter_prober.clients import (
 )
 from agentrouter_prober.config import Settings, TelegramSettings
 from agentrouter_prober.key_messages import DAY_SECONDS, key_summary
-from agentrouter_prober.state import StateStore
+from agentrouter_prober.state import ManualProbeState, PersistentState, StateStore, utc_now
 
 
 def make_settings(directory: Path) -> Settings:
@@ -135,6 +137,7 @@ def test_probe_now_forces_a_new_complete_cycle(state_directory):
     async def run():
         await commands.handle_update(message("Status"))
         await commands.handle_update(message("⚡ Probe Now"))
+        await commands._manual_probe_task
 
     asyncio.run(run())
     assert agent.status_calls == 2
@@ -143,6 +146,83 @@ def test_probe_now_forces_a_new_complete_cycle(state_directory):
     assert telegram.sent[-1][0] == (
         "📡 Model Status\n\n✅ gpt-6.1-sol\n❌ gpt-6.2-sol\n❌ claude-opus-5-5"
     )
+
+
+def test_probe_now_joins_active_sweep_and_consumes_cooldown_updates(state_directory, monkeypatch):
+    settings, agent, telegram, commands = setup(state_directory)
+    clock = [utc_now()]
+    monkeypatch.setattr(bot_module, "utc_now", lambda: clock[0])
+    original_status = agent.fetch_model_status
+
+    async def run():
+        entered = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def slow_status():
+            entered.set()
+            await finish.wait()
+            return await original_status()
+
+        monkeypatch.setattr(agent, "fetch_model_status", slow_status)
+        automatic = asyncio.create_task(commands.prober.run_cycle())
+        await asyncio.wait_for(entered.wait(), 1)
+        await commands.handle_update({**message("/probe_now"), "update_id": 10})
+        journal = StateStore(settings.state_path).load().manual_probe
+        assert journal.pending_update_id == 10
+        await commands.handle_update({**message("/probe_now"), "update_id": 11})
+        await commands.handle_update(message("/balance"))
+        assert agent.account_calls == 1
+        assert agent.probed == []
+        finish.set()
+        await asyncio.wait_for(automatic, 1)
+        await asyncio.wait_for(commands._manual_probe_task, 1)
+        assert agent.status_calls == 1
+
+        await commands.handle_update({**message("/probe_now"), "update_id": 12})
+        assert telegram.sent[-1][0].endswith("in 60s.")
+        clock[0] += timedelta(seconds=61)
+        await commands.handle_update({**message("/probe_now"), "update_id": 12})
+        assert "already handled" in telegram.sent[-1][0]
+
+        await commands.handle_update({**message("/probe_now"), "update_id": 13})
+        await asyncio.wait_for(commands._manual_probe_task, 1)
+        assert agent.status_calls == 2
+        assert sum(text.startswith("📡 Model Status") for text, _ in telegram.sent) == 2
+
+    asyncio.run(run())
+
+
+def test_interrupted_manual_probe_is_reported_without_replaying_the_sweep(state_directory):
+    settings = make_settings(state_directory)
+    store = StateStore(settings.state_path)
+    store.save(PersistentState(manual_probe=ManualProbeState("123:42", 15, utc_now().isoformat(), 15)))
+    agent, telegram = FakeAgent(), FakeTelegram()
+    commands = TelegramCommands(telegram, Prober(settings, agent, telegram))
+
+    async def run():
+        stop = asyncio.Event()
+        automatic = asyncio.create_task(commands.prober.run_forever(stop))
+        await commands._report_interrupted_probe()
+        await commands.handle_update({**message("/probe_now"), "update_id": 15})
+        assert agent.status_calls == 0
+        assert any("interrupted" in text for text, _ in telegram.sent)
+        assert store.load().manual_probe.interruption_reported
+
+        restarted = Prober(settings, agent, telegram)
+        stop_restart = asyncio.Event()
+        after_restart = asyncio.create_task(restarted.run_forever(stop_restart))
+        await asyncio.sleep(0)
+        assert not restarted.cycle_running
+        stop_restart.set()
+        await asyncio.wait_for(after_restart, 1)
+
+        await commands.handle_update({**message("/probe_now"), "update_id": 16})
+        await asyncio.wait_for(commands._manual_probe_task, 1)
+        assert agent.status_calls == 1
+        stop.set()
+        await asyncio.wait_for(automatic, 1)
+
+    asyncio.run(run())
 
 
 def test_balance_command_reads_account_without_probing_models(state_directory):

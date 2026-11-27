@@ -18,6 +18,7 @@ build/
 state.json
 state.json.corrupt-*
 .state.json.*
+state.json.telegram-contact.json
 telegram.json
 .telegram.json.*
 .test-tmp/
